@@ -19,12 +19,13 @@ Last updated: 2026-11-02
 - MoldUDP64: whole-packet validation, sequencer (gap/dup/reorder/heartbeat/end-of-session,
   bounded reorder buffer, re-request with retry and skip), offline lossy replay, UDP unicast and
   multicast publisher/receiver, `mde replay|serve|listen`, fuzz target.
+- Two-thread pipeline (feed thread -> SPSC ring or mutex queue -> book thread), `--pipeline`
+  option, TSan job in CI.
 
 ## Remaining (acceptance criteria)
 
 | # | Milestone | Done when |
 |---|---|---|
-| 6 | Multithreaded pipeline | SPSC ring and mutex baseline; threaded replay digest equals single-threaded; TSan job in CI |
 | 7 | Simulated trading | matching engine (price-time), cancels, execution reports, positions, max qty/notional/position checks; deterministic digest test |
 | 8 | Performance | optimized book matches reference under differential tests; benchmarks for decode, book, queue, replay, e2e, order entry with p50/p95/p99/max |
 | 9 | Stress and failure | high/burst loss, reorder beyond buffer, re-request server down, malformed packets mixed in, sustained backpressure |
@@ -32,8 +33,8 @@ Last updated: 2026-11-02
 
 ## Latest test results
 
-97/97 pass on macOS (Apple clang 21: Debug, ASan+UBSan) and Linux in Docker (GCC 14, clang 18:
-Release and Debug ASan+UBSan, `-Werror`). Fuzzers: 60 s each, no findings.
+105/105 pass on macOS (Apple clang 21: Debug, ASan+UBSan, TSan) and Linux in Docker (GCC 14, clang
+18: Release, Debug ASan+UBSan, TSan; `-Werror`). Fuzzers: 60 s each, no findings.
 
 ## Known issues
 
@@ -42,4 +43,4 @@ Release and Debug ASan+UBSan, `-Werror`). Fuzzers: 60 s each, no findings.
 
 ## Next step
 
-Milestone 6: SPSC ring buffer, two-thread pipeline, TSan in CI.
+Milestone 7: simulated order entry, pre-trade risk and matching engine.

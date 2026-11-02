@@ -222,3 +222,44 @@ parallel.
 **Tests.** 97/97 pass on macOS (Debug, ASan+UBSan) and Linux (GCC 14 and clang 18, Release and
 ASan+UBSan). This includes a 40-seed property test of exactly-once, in-order delivery at 5–10%
 loss with duplication and reordering, and a real-socket loopback test.
+
+## 2026-11-02 — Milestone 6: multithreaded pipeline
+
+**Shape.** The feed thread receives packets, runs the sequencer and copies each in-order
+message into a 64-byte slot. A bounded queue carries the slots to the book thread, which
+decodes them and updates the book. The book thread owns all book state while the pipeline
+runs, and the queue is the only shared structure. When the queue is full, the producer spins
+and counts it. Nothing is dropped in-process; the kernel socket buffer and MoldUDP64
+re-requests handle overload upstream.
+
+**SPSC ring.**
+
+- Indices increase monotonically and are masked to address slots.
+- The release store of `tail_` publishes a slot to the consumer. The release store of `head_`
+  returns it to the producer.
+- Each side caches the other's index.
+- Producer-owned and consumer-owned fields sit on separate 128-byte lines.
+
+The baseline is a bounded `std::deque` under a `std::mutex` with the same `try_push`/`try_pop`
+interface. Whether the ring is worth having is a benchmark question for milestone 8, not
+something assumed here.
+
+**Checking the checker.** I temporarily weakened the publish/acquire pair on `tail_` to
+`relaxed` and ran the suite under TSan (macOS, Apple clang 21).
+`QueueTest/0.TwoThreadsPreserveOrderUnderContention` (8-byte payload) reported a data race in
+`try_pop`. The test that moves 64-byte slots did **not** report one on its own, although a
+standalone program with the same queue and a 64-byte payload did, at both `-O1` and `-O2`.
+I didn't find out why, so I'm not claiming that test detects ordering bugs. The suite as a
+whole, which CI runs, does catch this one.
+
+**Results.**
+
+- 105/105 tests pass under TSan on macOS (Apple clang 21) and Linux (clang 18 and GCC 14), and
+  under Debug and ASan on macOS.
+- `mde replay` at 2% drop and 2% reorder gives the same digest (`55edd1085deb3610`) inline,
+  with the SPSC pipeline and with the mutex pipeline.
+- `mde listen` with the SPSC pipeline over real UDP, 1% deliberate drop: 0 lost, same digest.
+
+**CI.** Added a TSan job with `vm.mmap_rnd_bits=28`. GitHub's Ubuntu 24.04 runners use 32-bit
+mmap randomisation, which is known to break TSan's shadow mapping. The Docker kernel here uses
+18 bits, so I could not reproduce that issue locally.
