@@ -31,7 +31,9 @@ struct PublishStats {
 };
 
 // Sends every message of `log`, answering re-requests that arrive on `socket` throughout, then
-// sends end-of-session packets every 100 ms until `linger` elapses or `stop` is set.
+// sends end-of-session packets (about every 100 ms, sooner while requests are arriving) until
+// `linger` elapses or `stop` is set. A local test tool: it answers any requester, so do not expose
+// it on an untrusted network (a 20-byte request yields up to max_packet_size bytes).
 PublishStats publish(UdpSocket& socket, const moldudp64::MessageLog& log, const PublishOptions& options,
                      const std::atomic<bool>& stop);
 

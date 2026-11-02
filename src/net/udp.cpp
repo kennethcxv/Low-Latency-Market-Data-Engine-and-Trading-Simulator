@@ -35,13 +35,14 @@ std::optional<Endpoint> parse_endpoint(const std::string& text) {
   Endpoint e;
   e.address.sin_family = AF_INET;
   if (inet_pton(AF_INET, text.substr(0, colon).c_str(), &e.address.sin_addr) != 1) return std::nullopt;
-  try {
-    const unsigned long port = std::stoul(text.substr(colon + 1));
-    if (port > 65535) return std::nullopt;
-    e.address.sin_port = htons(static_cast<std::uint16_t>(port));
-  } catch (const std::exception&) {
+  const std::string port_text = text.substr(colon + 1);
+  if (port_text.empty() || port_text.size() > 5 ||
+      port_text.find_first_not_of("0123456789") != std::string::npos) {
     return std::nullopt;
   }
+  const unsigned long port = std::stoul(port_text);
+  if (port > 65535) return std::nullopt;
+  e.address.sin_port = htons(static_cast<std::uint16_t>(port));
   return e;
 }
 
@@ -50,12 +51,14 @@ UdpSocket::UdpSocket(const std::string& bind_address, std::uint16_t port, const 
   fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
   if (fd_ < 0) fail("socket");
   try {
-    const int on = 1;
-    if (setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on) != 0) fail("SO_REUSEADDR");
+    // Only multicast receivers share a port; a unicast socket must own its port outright.
+    if (!multicast_group.empty()) {
+      const int on = 1;
+      if (setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on) != 0) fail("SO_REUSEADDR");
 #ifdef SO_REUSEPORT
-    // Lets several local receivers share one multicast port (needed on macOS/BSD).
-    if (!multicast_group.empty() && setsockopt(fd_, SOL_SOCKET, SO_REUSEPORT, &on, sizeof on) != 0) fail("SO_REUSEPORT");
+      if (setsockopt(fd_, SOL_SOCKET, SO_REUSEPORT, &on, sizeof on) != 0) fail("SO_REUSEPORT");  // macOS/BSD
 #endif
+    }
     // Ask for a large buffer: the socket buffer is what absorbs bursts while the feed thread is busy.
     const int want = 8 << 20;
     setsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &want, sizeof want);  // best effort; see receive_buffer_bytes()
@@ -95,9 +98,11 @@ std::optional<std::size_t> UdpSocket::receive(std::span<std::uint8_t> buffer, in
     }
     sockaddr_in peer{};
     socklen_t peer_len = sizeof peer;
-    const ssize_t n = ::recvfrom(fd_, buffer.data(), buffer.size(), 0, reinterpret_cast<sockaddr*>(&peer), &peer_len);
+    // Non-blocking: Linux can report a datagram readable and then discard it (bad checksum), and a
+    // blocking read here would then hang past the caller's timeout.
+    const ssize_t n = ::recvfrom(fd_, buffer.data(), buffer.size(), MSG_DONTWAIT, reinterpret_cast<sockaddr*>(&peer), &peer_len);
     if (n < 0) {
-      if (errno == EINTR || errno == EAGAIN) continue;
+      if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
       fail("recvfrom");
     }
     if (from) from->address = peer;
@@ -105,14 +110,18 @@ std::optional<std::size_t> UdpSocket::receive(std::span<std::uint8_t> buffer, in
   }
 }
 
-void UdpSocket::send_to(Bytes data, const Endpoint& to) {
+bool UdpSocket::send_to(Bytes data, const Endpoint& to) {
   for (;;) {
     const ssize_t n = ::sendto(fd_, data.data(), data.size(), 0, reinterpret_cast<const sockaddr*>(&to.address),
                                sizeof to.address);
-    if (n >= 0) return;
+    if (n >= 0) return true;
     if (errno == EINTR) continue;
-    // ENOBUFS: the kernel dropped it; for UDP that is just loss, which MoldUDP64 recovers from.
-    if (errno == ENOBUFS) return;
+    // Transient conditions are just loss for UDP, which MoldUDP64 recovers from. Anything else
+    // (EMSGSIZE, EBADF, ...) is a programming or configuration error.
+    if (errno == ENOBUFS || errno == EAGAIN || errno == EWOULDBLOCK || errno == EHOSTUNREACH ||
+        errno == ENETUNREACH || errno == ENETDOWN || errno == ECONNREFUSED || errno == EPERM) {
+      return false;
+    }
     fail("sendto");
   }
 }

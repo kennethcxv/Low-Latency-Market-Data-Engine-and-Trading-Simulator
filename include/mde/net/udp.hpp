@@ -35,7 +35,9 @@ class UdpSocket {
 
   // Waits up to timeout_ms for one datagram; returns its size, or nothing on timeout.
   std::optional<std::size_t> receive(std::span<std::uint8_t> buffer, int timeout_ms, Endpoint* from = nullptr);
-  void send_to(Bytes data, const Endpoint& to);
+  // Returns false if the datagram was dropped for a transient reason (no buffer space, network
+  // unreachable, ...); throws std::system_error on errors that will not go away by retrying.
+  bool send_to(Bytes data, const Endpoint& to);
 
   std::uint16_t local_port() const;
   // Kernel receive buffer actually granted (Linux caps requests at net.core.rmem_max; it also

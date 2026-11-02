@@ -84,6 +84,15 @@ TEST(Replay, UnrecoverableLossIsReportedAndBookStaysValid) {
   EXPECT_EQ(market.check_all_invariants(), "");
 }
 
+TEST(Net, ParseEndpointIsStrict) {
+  EXPECT_TRUE(net::parse_endpoint("127.0.0.1:31001"));
+  EXPECT_EQ(net::parse_endpoint("10.1.2.3:65535")->to_string(), "10.1.2.3:65535");
+  for (const char* bad : {"127.0.0.1", "127.0.0.1:", "127.0.0.1:80abc", "127.0.0.1: 80", "127.0.0.1:+80",
+                          "127.0.0.1:65536", "localhost:80", "1.2.3:80"}) {
+    EXPECT_FALSE(net::parse_endpoint(bad)) << bad;
+  }
+}
+
 // Real sockets on loopback: the publisher drops 3% of first transmissions on purpose, and the
 // receiver must recover them through re-requests sent from its own socket.
 TEST(Replay, UdpLoopbackRecoversDeliberateLoss) {

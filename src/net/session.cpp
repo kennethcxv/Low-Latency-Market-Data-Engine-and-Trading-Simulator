@@ -9,7 +9,10 @@ void answer_requests(UdpSocket& socket, const moldudp64::MessageLog& log, const 
                      PublishStats& stats, int timeout_ms) {
   std::uint8_t buf[512];
   Endpoint from;
-  while (auto n = socket.receive(buf, timeout_ms, &from)) {
+  // Bounded per call so a stream of requests cannot starve publishing, linger or stop.
+  for (int handled = 0; handled < 64; ++handled) {
+    const auto n = socket.receive(buf, timeout_ms, &from);
+    if (!n) return;
     timeout_ms = 0;  // drain whatever else is queued without waiting
     const auto request = moldudp64::parse_request(Bytes(buf, *n));
     if (!request) continue;
@@ -45,10 +48,10 @@ PublishStats publish(UdpSocket& socket, const moldudp64::MessageLog& log, const 
 
   const auto end_of_session = moldudp64::make_end_of_session(log.session(), log.size() + 1);
   const auto linger_until = Clock::now() + options.linger;
-  while (Clock::now() < linger_until && !stop.load(std::memory_order_relaxed)) {
+  do {  // always at least one end-of-session packet, even with no linger
     socket.send_to(end_of_session, options.destination);
     answer_requests(socket, log, options, stats, 100);
-  }
+  } while (Clock::now() < linger_until && !stop.load(std::memory_order_relaxed));
   return stats;
 }
 
