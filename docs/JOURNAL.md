@@ -91,3 +91,33 @@ rejections. All pass in these configurations:
 - macOS (Apple clang 21): Debug, and ASan+UBSan.
 - Ubuntu 24.04 in Docker: GCC 14 and clang 18, each plain and with ASan+UBSan, all with
   `-Werror`.
+
+## 2026-11-02 — Milestone 3: protocol conformance
+
+**Golden vectors.** There is one vector per message type, all 23, laid out field by field from
+the spec's offset tables. A small script outside the repo derived them. It asserts that each
+field's offset equals the running sum of the previous widths and that the total matches the
+spec length. In every vector, each integer byte holds its own offset. A field read from the
+wrong place or with the wrong width therefore decodes to a visibly different number.
+
+To check that the tests can actually fail, I temporarily swapped the two same-width LULD collar
+fields in the message definition. The size `static_assert` cannot catch that. The golden test
+failed on exactly those two fields, as intended, and the change was reverted.
+
+**Malformed input.** Buffers are allocated at their exact size, so ASan turns any over-read into
+a crash. Coverage:
+
+- Every wrong length from 0 to `kSize+8` for every type.
+- All 233 unassigned type bytes.
+- All 254 invalid values of each validated enumerated field.
+- A seeded mutation test over a 400-message framed stream, with 3,000 mutated copies. Mutations
+  are byte replacement, bit flips, insertions and truncation.
+
+The property checked is that an accepted message re-encodes to exactly its input bytes. The
+test also asserts that every decode outcome was actually produced at least once, so it can't
+pass vacuously.
+
+**libFuzzer** (`fuzz/fuzz_itch.cpp`, clang 18, ASan+UBSan, Linux in Docker): 11,465,468
+executions in 60 s, 219 coverage edges, no crashes. CI now runs each fuzz target for 60 s.
+
+**Results.** 59/59 tests pass on macOS in Debug and in ASan+UBSan.

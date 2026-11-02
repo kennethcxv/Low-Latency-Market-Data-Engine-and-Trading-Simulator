@@ -10,12 +10,14 @@ Last updated: 2026-11-02
 - ITCH 5.0 decoder and encoder for all 23 message types. Wire sizes are checked against the
   spec at compile time.
 - `mde decode` CLI.
+- Conformance: golden vectors for all 23 types; exhaustive length, type-byte and enum rejection
+  tests; seeded mutation fuzz in ctest; libFuzzer target in CI (11.4M execs / 60 s locally, no
+  crashes).
 
 ## Remaining (acceptance criteria)
 
 | # | Milestone | Done when |
 |---|---|---|
-| 3 | Protocol conformance | golden vectors for all 23 types; every truncation/extension and type byte rejected safely; mutation fuzz in ctest; libFuzzer target in CI |
 | 4 | Reference order book | add/execute/cancel/delete/replace with priority; invariants checked after every event; P/Q/C volume semantics tested; synthetic generator; `mde book` |
 | 5 | Sequencing and replay | MoldUDP64 parser with golden vectors; sequencer handles gap/dup/reorder/heartbeat/end-of-session; lossy replay recovers to the same book digest as lossless; UDP loopback test with re-requests |
 | 6 | Multithreaded pipeline | SPSC ring and mutex baseline; threaded replay digest equals single-threaded; TSan job in CI |
@@ -26,8 +28,8 @@ Last updated: 2026-11-02
 
 ## Latest test results
 
-32/32 pass on macOS (Apple clang 21: Debug, ASan+UBSan) and on Ubuntu 24.04 in Docker (GCC 14 and
-clang 18, each plain and with ASan+UBSan, all with `-Werror`).
+59/59 pass on macOS (Apple clang 21: Debug, ASan+UBSan). GitHub Actions run 41445072654 passed
+(GCC 14 and clang 18, Release and ASan+UBSan).
 
 ## Known issues
 
@@ -35,4 +37,4 @@ None open.
 
 ## Next step
 
-Milestone 3: golden vectors and malformed-input coverage for the decoder.
+Milestone 4: reference order book, ITCH-to-book builder, synthetic generator, `mde book`.
