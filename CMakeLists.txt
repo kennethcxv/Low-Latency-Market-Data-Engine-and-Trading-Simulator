@@ -22,6 +22,11 @@ if(MDE_SANITIZE)
   add_link_options(-fsanitize=${MDE_SANITIZE})
 endif()
 
+if(APPLE)
+  # Apple's ld warns when a static library is reached through two dependency paths; harmless.
+  add_link_options(LINKER:-no_warn_duplicate_libraries)
+endif()
+
 add_library(mde_warnings INTERFACE)
 target_compile_options(mde_warnings INTERFACE
   -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wnon-virtual-dtor -Wold-style-cast

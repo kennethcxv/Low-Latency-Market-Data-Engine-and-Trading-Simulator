@@ -1,5 +1,7 @@
 // mde: command-line front end. Each subcommand is a thin layer over the libraries.
+#include <algorithm>
 #include <array>
+#include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
@@ -10,11 +12,54 @@
 #include <type_traits>
 #include <vector>
 
+#include "mde/book/book_builder.hpp"
+#include "mde/book/reference_market.hpp"
 #include "mde/common.hpp"
 #include "mde/itch/codec.hpp"
 #include "mde/itch/format.hpp"
+#include "mde/synth/generator.hpp"
 
 namespace {
+
+// Positional arguments plus `--name value` options and bare `--flag`s.
+class Args {
+ public:
+  Args(const std::vector<std::string_view>& raw, std::initializer_list<std::string_view> flags) {
+    for (std::size_t i = 0; i < raw.size(); ++i) {
+      if (!raw[i].starts_with("--")) {
+        positional_.emplace_back(raw[i]);
+      } else if (std::find(flags.begin(), flags.end(), raw[i]) != flags.end()) {
+        options_.emplace_back(raw[i], "");
+      } else if (i + 1 < raw.size()) {
+        options_.emplace_back(raw[i], raw[i + 1]);
+        ++i;
+      } else {
+        throw std::invalid_argument("missing value for " + std::string(raw[i]));
+      }
+    }
+  }
+
+  const std::vector<std::string>& positional() const { return positional_; }
+  bool has(std::string_view name) const { return find(name) != nullptr; }
+  std::uint64_t number(std::string_view name, std::uint64_t fallback) const {
+    const std::string* v = find(name);
+    return v ? std::stoull(*v) : fallback;
+  }
+  std::string text(std::string_view name, std::string fallback) const {
+    const std::string* v = find(name);
+    return v ? *v : fallback;
+  }
+
+ private:
+  const std::string* find(std::string_view name) const {
+    for (const auto& [k, v] : options_) {
+      if (k == name) return &v;
+    }
+    return nullptr;
+  }
+  std::vector<std::string> positional_;
+  std::vector<std::pair<std::string, std::string>> options_;
+};
 
 // shortcut: reads the whole file into memory; switch to mmap once multi-GB captures matter.
 std::vector<std::uint8_t> read_file(const std::string& path) {
@@ -23,17 +68,27 @@ std::vector<std::uint8_t> read_file(const std::string& path) {
   return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
 }
 
-int cmd_decode(const std::vector<std::string_view>& args) {
-  if (args.empty()) {
+void write_file(const std::string& path, const std::vector<std::uint8_t>& data) {
+  std::ofstream out(path, std::ios::binary);
+  out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+  if (!out) throw std::runtime_error("cannot write " + path);
+}
+
+std::string price_text(mde::book::Price p) {
+  char buf[32];
+  std::snprintf(buf, sizeof buf, "%u.%04u", p / 10'000, p % 10'000);
+  return buf;
+}
+
+int cmd_decode(const std::vector<std::string_view>& raw) {
+  const Args args(raw, {});
+  if (args.positional().size() != 1) {
     std::fprintf(stderr, "usage: mde decode FILE [--print N]\n");
     return 2;
   }
-  long print_limit = 0;
-  for (std::size_t i = 1; i + 1 < args.size(); i += 2) {
-    if (args[i] == "--print") print_limit = std::stol(std::string(args[i + 1]));
-  }
+  std::uint64_t print_limit = args.number("--print", 0);
 
-  const std::vector<std::uint8_t> file = read_file(std::string(args[0]));
+  const std::vector<std::uint8_t> file = read_file(args.positional()[0]);
   mde::FramedReader reader{file};
   std::array<std::uint64_t, 256> count_by_type{};
   std::array<std::string_view, 256> name_by_type{};
@@ -58,20 +113,114 @@ int cmd_decode(const std::vector<std::string_view>& args) {
   std::printf("%-28s %12s\n", "message", "count");
   for (std::size_t t = 0; t < count_by_type.size(); ++t) {
     if (count_by_type[t] == 0) continue;
-    std::printf("%c %-26.*s %12llu\n", static_cast<char>(t), static_cast<int>(name_by_type[t].size()),
-                name_by_type[t].data(), static_cast<unsigned long long>(count_by_type[t]));
+    std::printf("%c %-26.*s %12" PRIu64 "\n", static_cast<char>(t), static_cast<int>(name_by_type[t].size()),
+                name_by_type[t].data(), count_by_type[t]);
   }
   for (std::size_t s = 1; s < count_by_status.size(); ++s) {
     if (count_by_status[s] == 0) continue;
     const auto name = mde::itch::to_string(static_cast<mde::itch::DecodeStatus>(s));
-    std::printf("rejected %-19.*s %12llu\n", static_cast<int>(name.size()), name.data(),
-                static_cast<unsigned long long>(count_by_status[s]));
+    std::printf("rejected %-19.*s %12" PRIu64 "\n", static_cast<int>(name.size()), name.data(),
+                count_by_status[s]);
   }
   if (framing == mde::FramedReader::Status::kTruncated) {
     std::printf("truncated record at byte offset %zu\n", reader.offset());
     return 1;
   }
   return 0;
+}
+
+int cmd_gen(const std::vector<std::string_view>& raw) {
+  const Args args(raw, {});
+  if (!args.has("--out")) {
+    std::fprintf(stderr, "usage: mde gen --out FILE [--seed N] [--messages N] [--symbols N]\n");
+    return 2;
+  }
+  mde::synth::Config config;
+  config.seed = args.number("--seed", config.seed);
+  config.messages = args.number("--messages", config.messages);
+  config.symbols = args.number("--symbols", config.symbols);
+  const auto data = mde::synth::generate(config);
+  write_file(args.text("--out", ""), data);
+  std::printf("wrote %zu synthetic messages (%zu bytes) to %s\n", config.messages, data.size(),
+              args.text("--out", "").c_str());
+  return 0;
+}
+
+template <class Builder>
+void print_book_report(const Builder& builder, std::size_t top) {
+  using mde::book::Locate;
+  using mde::book::Side;
+  const auto& market = builder.market();
+  std::vector<Locate> active;
+  for (std::size_t loc = 1; loc < mde::book::kMaxLocates; ++loc) {
+    const auto l = static_cast<Locate>(loc);
+    if (builder.stats(l).volume > 0 || market.best(l, Side::kBuy) || market.best(l, Side::kSell)) active.push_back(l);
+  }
+  std::stable_sort(active.begin(), active.end(),
+                   [&](Locate a, Locate b) { return builder.stats(a).volume > builder.stats(b).volume; });
+  if (active.size() > top) active.resize(top);
+
+  std::printf("%-8s %22s %22s %10s %14s %10s %12s\n", "symbol", "bid (qty @ px)", "ask (qty @ px)",
+              "spread", "volume", "trades", "last");
+  for (Locate l : active) {
+    const auto bid = market.best(l, Side::kBuy);
+    const auto ask = market.best(l, Side::kSell);
+    auto side_text = [](const auto& level) {
+      return level ? std::to_string(level->quantity) + " @ " + price_text(level->price) : std::string("-");
+    };
+    const std::string spread = bid && ask ? (ask->price >= bid->price ? price_text(ask->price - bid->price) : "crossed") : "-";
+    const auto& s = builder.stats(l);
+    std::printf("%-8.*s %22s %22s %10s %14" PRIu64 " %10" PRIu64 " %12s\n",
+                static_cast<int>(mde::itch::trim(builder.symbol(l)).size()), mde::itch::trim(builder.symbol(l)).data(),
+                side_text(bid).c_str(), side_text(ask).c_str(), spread.c_str(), s.volume, s.trades,
+                price_text(s.last_price).c_str());
+  }
+}
+
+int cmd_book(const std::vector<std::string_view>& raw) {
+  const Args args(raw, {"--check"});
+  if (args.positional().size() != 1) {
+    std::fprintf(stderr, "usage: mde book FILE [--check] [--top N]\n");
+    return 2;
+  }
+  const bool check = args.has("--check");
+  const std::vector<std::uint8_t> file = read_file(args.positional()[0]);
+
+  mde::book::ReferenceMarket market;
+  mde::book::BookBuilder builder(market, check);
+  mde::FramedReader reader{file};
+  mde::Bytes msg;
+  mde::FramedReader::Status framing;
+  while ((framing = reader.next(msg)) == mde::FramedReader::Status::kOk) builder.apply(msg);
+
+  print_book_report(builder, args.number("--top", 10));
+
+  const auto& c = builder.counters();
+  std::printf("\nmessages %" PRIu64 ", resting orders %zu, broken trades %" PRIu64 "\n", c.messages,
+              market.order_count(), c.broken_trades);
+  for (std::size_t s = 1; s < c.decode.size(); ++s) {
+    if (c.decode[s]) std::printf("decode rejected (%s): %" PRIu64 "\n", mde::itch::to_string(static_cast<mde::itch::DecodeStatus>(s)).data(), c.decode[s]);
+  }
+  for (std::size_t r = 1; r < c.book.size(); ++r) {
+    if (c.book[r]) std::printf("book anomaly (%s): %" PRIu64 "\n", mde::book::to_string(static_cast<mde::book::Result>(r)).data(), c.book[r]);
+  }
+  std::printf("state digest %016" PRIx64 "\n", mde::book::state_digest(market));
+
+  int rc = framing == mde::FramedReader::Status::kTruncated ? 1 : 0;
+  if (framing == mde::FramedReader::Status::kTruncated) std::printf("truncated record at byte offset %zu\n", reader.offset());
+  if (check) {
+    std::string final_check = market.check_all_invariants();
+    if (c.invariant_violations || !final_check.empty()) {
+      std::printf("INVARIANT VIOLATIONS: %" PRIu64 "; first: %s %s\n", c.invariant_violations,
+                  builder.first_violation().c_str(), final_check.c_str());
+      rc = 1;
+    } else {
+      std::uint64_t events = 0;
+      for (auto n : c.book) events += n;
+      std::printf("invariants held after every book event (%" PRIu64 " checks)\n", events);
+    }
+  }
+  return rc;
 }
 
 struct Command {
@@ -82,6 +231,8 @@ struct Command {
 
 constexpr std::array kCommands = {
     Command{"decode", cmd_decode, "decode a length-prefixed ITCH 5.0 file and count messages"},
+    Command{"gen", cmd_gen, "generate a synthetic ITCH 5.0 file"},
+    Command{"book", cmd_book, "rebuild order books from an ITCH 5.0 file and report top of book"},
 };
 
 void usage() {
