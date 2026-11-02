@@ -45,6 +45,18 @@
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "MDE_SANITIZE": "thread"
       }
+    },
+    {
+      "name": "fuzz",
+      "displayName": "libFuzzer targets (upstream clang only)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "MDE_SANITIZE": "address,undefined",
+        "MDE_BUILD_FUZZ": "ON",
+        "MDE_BUILD_TESTS": "OFF"
+      }
     }
   ],
   "buildPresets": [
@@ -63,6 +75,10 @@
     {
       "name": "tsan",
       "configurePreset": "tsan"
+    },
+    {
+      "name": "fuzz",
+      "configurePreset": "fuzz"
     }
   ],
   "testPresets": [

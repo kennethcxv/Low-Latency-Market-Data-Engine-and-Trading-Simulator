@@ -34,3 +34,27 @@ jobs:
         run: cmake --build build
       - name: Test
         run: ctest --test-dir build --output-on-failure -j 4
+
+  fuzz:
+    name: libFuzzer / clang-18
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y ninja-build clang-18 libclang-rt-18-dev
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_CXX_COMPILER=clang++-18
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DMDE_SANITIZE=address,undefined
+          -DMDE_BUILD_FUZZ=ON -DMDE_BUILD_TESTS=OFF -DMDE_WERROR=ON
+      - name: Build
+        run: cmake --build build
+      - name: Fuzz (60 s per target)
+        run: |
+          for target in build/fuzz/fuzz_*; do
+            name=$(basename "$target")
+            mkdir -p "corpus/$name"
+            "$target" "corpus/$name" -max_total_time=60 -print_final_stats=1
+          done

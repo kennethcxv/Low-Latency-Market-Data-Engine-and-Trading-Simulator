@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(MDE_BUILD_TESTS "Build unit and integration tests" ON)
+option(MDE_BUILD_FUZZ  "Build libFuzzer targets (upstream clang only)" OFF)
 option(MDE_WERROR      "Treat warnings as errors" OFF)
 set(MDE_SANITIZE "" CACHE STRING "Comma-separated -fsanitize= list, e.g. address,undefined or thread")
 
@@ -40,4 +41,8 @@ if(MDE_BUILD_TESTS)
   FetchContent_MakeAvailable(googletest)
   enable_testing()
   add_subdirectory(tests)
+endif()
+
+if(MDE_BUILD_FUZZ)
+  add_subdirectory(fuzz)
 endif()
