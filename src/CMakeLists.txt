@@ -21,3 +21,6 @@ target_link_libraries(mde_net PUBLIC mde_moldudp64 PRIVATE mde_warnings)
 
 add_library(mde_pipeline INTERFACE)
 target_link_libraries(mde_pipeline INTERFACE mde_common Threads::Threads)
+
+add_library(mde_sim STATIC sim/exchange.cpp sim/simulator.cpp)
+target_link_libraries(mde_sim PUBLIC mde_common PRIVATE mde_warnings)

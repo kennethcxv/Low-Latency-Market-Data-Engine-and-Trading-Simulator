@@ -26,6 +26,7 @@
 #include "mde/moldudp64/replay.hpp"
 #include "mde/net/session.hpp"
 #include "mde/pipeline/pipeline.hpp"
+#include "mde/sim/simulator.hpp"
 #include "mde/synth/generator.hpp"
 
 namespace {
@@ -367,6 +368,37 @@ int cmd_listen(const std::vector<std::string_view>& raw) {
   return finish_report(builder, check, args.number("--top", 10));
 }
 
+int cmd_sim(const std::vector<std::string_view>& raw) {
+  const Args args(raw, {});
+  mde::sim::SimConfig config;
+  config.seed = args.number("--seed", config.seed);
+  config.steps = args.number("--steps", config.steps);
+  config.accounts = args.number("--accounts", config.accounts);
+  config.instruments = args.number("--instruments", config.instruments);
+  config.limits.max_order_quantity = static_cast<mde::sim::Qty>(args.number("--max-qty", static_cast<std::uint64_t>(config.limits.max_order_quantity)));
+  config.limits.max_order_notional = static_cast<std::int64_t>(args.number("--max-notional", static_cast<std::uint64_t>(config.limits.max_order_notional)));
+  config.limits.max_position = static_cast<std::int64_t>(args.number("--max-position", static_cast<std::uint64_t>(config.limits.max_position)));
+  if (config.accounts == 0 || config.instruments == 0) throw std::invalid_argument("need at least one account and instrument");
+
+  mde::sim::Exchange exchange(config.instruments, config.limits);
+  const auto s = mde::sim::simulate(config, exchange);
+  std::printf("requests: %" PRIu64 " new orders, %" PRIu64 " cancels -> %" PRIu64 " execution reports\n", s.new_orders,
+              s.cancels, s.reports);
+  std::printf("trades: %" PRIu64 " fill reports, %" PRId64 " shares traded\n", s.fills, s.traded_quantity);
+  for (std::size_t r = 1; r < s.rejects.size(); ++r) {
+    if (s.rejects[r]) std::printf("rejected (%s): %" PRIu64 "\n", mde::sim::to_string(static_cast<mde::sim::RejectReason>(r)).data(), s.rejects[r]);
+  }
+  std::printf("\n%-8s %-10s %10s %10s %10s\n", "account", "instrument", "net", "open buy", "open sell");
+  for (mde::sim::AccountId a = 0; a < config.accounts; ++a) {
+    for (mde::sim::InstrumentId i = 0; i < config.instruments; ++i) {
+      const auto& p = exchange.position(a, i);
+      std::printf("%-8u %-10u %10" PRId64 " %10" PRId64 " %10" PRId64 "\n", a, i, p.net, p.open_buy, p.open_sell);
+    }
+  }
+  std::printf("report digest %016" PRIx64 "\n", s.digest);
+  return 0;
+}
+
 struct Command {
   std::string_view name;
   int (*run)(const std::vector<std::string_view>&);
@@ -380,6 +412,7 @@ constexpr std::array kCommands = {
     Command{"replay", cmd_replay, "replay a file through MoldUDP64 with simulated loss and recovery"},
     Command{"serve", cmd_serve, "publish a file as MoldUDP64 over UDP and answer re-requests"},
     Command{"listen", cmd_listen, "receive a MoldUDP64 session over UDP and rebuild the books"},
+    Command{"sim", cmd_sim, "run the deterministic order-entry, risk and matching simulation"},
 };
 
 void usage() {

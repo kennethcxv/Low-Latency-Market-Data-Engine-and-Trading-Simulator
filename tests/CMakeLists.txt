@@ -9,8 +9,9 @@ add_executable(mde_tests
   test_moldudp64.cpp
   test_sequencer.cpp
   test_replay.cpp
-  test_pipeline.cpp)
-target_link_libraries(mde_tests PRIVATE mde_book mde_synth mde_moldudp64 mde_net mde_pipeline mde_itch mde_warnings GTest::gtest_main)
+  test_pipeline.cpp
+  test_sim.cpp)
+target_link_libraries(mde_tests PRIVATE mde_book mde_synth mde_moldudp64 mde_net mde_pipeline mde_sim mde_itch mde_warnings GTest::gtest_main)
 
 include(GoogleTest)
 # GCC's ASan stack-use-after-return instrumentation made the property tests ~300x slower
