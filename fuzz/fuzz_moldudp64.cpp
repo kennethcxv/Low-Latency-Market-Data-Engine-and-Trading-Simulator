@@ -1,6 +1,7 @@
 // libFuzzer target: the input is a framed list of datagrams ([u16 length][datagram]...) fed to a
-// Sequencer with timers firing between them. Invariant: delivered sequence numbers strictly
-// increase (in order, never twice), whatever the datagrams contain.
+// Sequencer with timers firing between them. Invariants, whatever the datagrams contain: delivered
+// sequence numbers strictly increase (in order, never twice), and every sequence below the next
+// expected one is accounted for as delivered or lost.
 #include <cstdint>
 #include <cstdlib>
 
@@ -31,6 +32,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     now += 2;
     while (seq.on_timer(now, deliver)) {
     }
+    // Every sequence below next_sequence() was either delivered once or counted as lost.
+    if (seq.stats().delivered + seq.stats().messages_lost != seq.next_sequence() - 1) std::abort();
   }
   return 0;
 }

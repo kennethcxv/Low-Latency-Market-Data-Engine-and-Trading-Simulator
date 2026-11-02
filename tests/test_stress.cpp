@@ -130,9 +130,10 @@ TEST(Stress, DeadRerequestServerLosesDataButStaysConsistent) {
   EXPECT_NE(o.digest, direct_digest());
 }
 
-// A (valid-looking) packet claiming a sequence 10^12 ahead must not hang the receiver or make it
-// allocate for the hole: requests are capped, and the hole is eventually skipped.
-TEST(Stress, AbsurdSequenceJumpIsBoundedWork) {
+// A heartbeat claiming a sequence 10^12 ahead is beyond max_sequence_jump (2^32) and rejected
+// outright. A large but plausible jump (10^9) is accepted: requests stay capped, the hole is
+// skipped after the retry budget, and nothing is allocated in proportion to the hole.
+TEST(Stress, AbsurdSequenceJumpIsRejectedAndLargeJumpIsBoundedWork) {
   moldudp64::SequencerConfig cfg;
   cfg.request_timeout_ns = 1;
   cfg.max_request_attempts = 3;
@@ -144,7 +145,13 @@ TEST(Stress, AbsurdSequenceJumpIsBoundedWork) {
   std::uint64_t delivered = 0;
   auto deliver = [&](std::uint64_t, Bytes) { ++delivered; };
   seq.on_packet(log.packet(1, 1, 1400), 0, deliver);
+
   seq.on_packet(moldudp64::make_heartbeat(session, 1'000'000'000'002ULL), 0, deliver);
+  EXPECT_EQ(seq.stats().implausible_sequences, 1u);
+  EXPECT_FALSE(seq.has_gap());
+
+  seq.on_packet(moldudp64::make_heartbeat(session, 1'000'000'002ULL), 0, deliver);
+  ASSERT_TRUE(seq.has_gap());
   int requests = 0;
   for (std::uint64_t t = 1; t < 100 && seq.has_gap(); ++t) {
     if (auto r = seq.on_timer(t, deliver)) {
@@ -154,7 +161,7 @@ TEST(Stress, AbsurdSequenceJumpIsBoundedWork) {
   }
   EXPECT_EQ(requests, 3);
   EXPECT_FALSE(seq.has_gap());
-  EXPECT_EQ(seq.stats().messages_lost, 1'000'000'000'000ULL);
+  EXPECT_EQ(seq.stats().messages_lost, 1'000'000'000ULL);
   EXPECT_EQ(delivered, 1u);
 }
 

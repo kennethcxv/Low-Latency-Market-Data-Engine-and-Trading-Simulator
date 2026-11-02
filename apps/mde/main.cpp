@@ -244,9 +244,9 @@ int cmd_book(const std::vector<std::string_view>& raw) {
 void print_sequencer_stats(const mde::moldudp64::SequencerStats& s) {
   std::printf("moldudp64: packets %" PRIu64 ", delivered %" PRIu64 ", duplicates %" PRIu64 ", out-of-order %" PRIu64
               ", gaps %" PRIu64 ", requests %" PRIu64 ", lost %" PRIu64 ", malformed %" PRIu64 ", session mismatches %" PRIu64
-              ", buffer overflows %" PRIu64 "\n",
+              ", implausible sequences %" PRIu64 ", buffer overflows %" PRIu64 "\n",
               s.packets, s.delivered, s.duplicates, s.out_of_order_packets, s.gaps_detected, s.requests_sent,
-              s.messages_lost, s.malformed_packets, s.session_mismatches, s.buffer_overflows);
+              s.messages_lost, s.malformed_packets, s.session_mismatches, s.implausible_sequences, s.buffer_overflows);
 }
 
 // Feeds every message `source` delivers to `builder`: inline on this thread ("none"), or on a

@@ -12,10 +12,19 @@
 //    max_request_count; the server may answer with fewer messages than asked (the spec allows it),
 //    so requests repeat until the hole is filled. Any progress resets the attempt budget.
 //  * If a hole cannot be filled after max_request_attempts timeouts, or after one timeout when
-//    re-requests are disabled, it is skipped: counted in messages_lost, and delivery resumes from
-//    the buffered packets. Downstream state is then known to be incomplete. Without re-requests,
-//    the timeout runs from when the hole was revealed (the arrival of the packet after it), not
-//    from when it reached the head of the line, so several holes age in parallel.
+//    re-requests are disabled, the whole hole is skipped: counted in messages_lost, and delivery
+//    resumes from the buffered packets. Downstream state is then known to be incomplete. Skipping
+//    all of it (rather than only the range last requested) favours getting back to live data over
+//    draining a hole slowly while the server is unreachable. Without re-requests, the timeout runs
+//    from when the hole was revealed (the arrival of the packet after it), not from when it
+//    reached the head of the line, so several holes age in parallel.
+//  * The first request for a new hole goes out on the next on_timer() call; there is no grace
+//    period for plain reordering, which therefore costs some redundant retransmissions.
+//  * MoldUDP64 carries no checksum. A packet claiming a sequence more than max_sequence_jump
+//    beyond anything seen (a corrupted high-order byte, or forgery) is rejected and counted rather
+//    than allowed to open a hole that would stall the receiver. Lower-order corruption is not
+//    detectable at this layer; the UDP checksum is the defence there.
+//  * Times passed in must be non-decreasing; elapsed time saturates at zero if they are not.
 #pragma once
 
 #include <algorithm>
@@ -33,6 +42,8 @@ struct SequencerConfig {
   std::optional<Session> session;  // expected session; if unset, the first valid packet's is used
   std::uint64_t next_sequence = 1;
   std::size_t max_buffered_packets = 4096;
+  std::size_t max_buffered_bytes = 64 << 20;
+  std::uint64_t max_sequence_jump = 1ULL << 32;  // more than a full trading day of messages
   std::uint16_t max_request_count = 1024;
   std::uint64_t request_timeout_ns = 20'000'000;
   std::uint32_t max_request_attempts = 5;  // 0 disables re-requests
@@ -41,6 +52,7 @@ struct SequencerConfig {
 struct SequencerStats {
   std::uint64_t packets = 0;
   std::uint64_t malformed_packets = 0;
+  std::uint64_t implausible_sequences = 0;  // claimed a sequence beyond max_sequence_jump
   std::uint64_t session_mismatches = 0;
   std::uint64_t heartbeats = 0;            // includes end-of-session packets
   std::uint64_t delivered = 0;
@@ -75,6 +87,14 @@ class Sequencer {
       return;
     }
 
+    // upstream_next_ >= next_ always; the limit saturates so a huge configured jump disables the check.
+    const std::uint64_t limit = upstream_next_ > UINT64_MAX - config_.max_sequence_jump
+                                    ? UINT64_MAX
+                                    : upstream_next_ + config_.max_sequence_jump;
+    if (p.header.sequence > limit) {
+      ++stats_.implausible_sequences;
+      return;
+    }
     if (p.header.sequence > upstream_next_) ++stats_.gaps_detected;
     if (p.next_sequence() > upstream_next_) {
       upstream_next_ = p.next_sequence();
@@ -103,7 +123,7 @@ class Sequencer {
         attempts_ = 0;
       }
       if (attempts_ < config_.max_request_attempts) {
-        if (attempts_ > 0 && now_ns - last_request_ns_ < config_.request_timeout_ns) return std::nullopt;
+        if (attempts_ > 0 && elapsed(now_ns, last_request_ns_) < config_.request_timeout_ns) return std::nullopt;
         ++attempts_;
         ++stats_.requests_sent;
         last_request_ns_ = now_ns;
@@ -113,7 +133,7 @@ class Sequencer {
       // Give the last request, or plain reordering when re-requests are off, one timeout to land.
       const std::uint64_t revealed = pending_.empty() ? upstream_advanced_ns_ : pending_.begin()->second.arrival_ns;
       const std::uint64_t since = attempts_ > 0 ? last_request_ns_ : revealed;
-      if (now_ns - since < config_.request_timeout_ns) return std::nullopt;
+      if (elapsed(now_ns, since) < config_.request_timeout_ns) return std::nullopt;
       const std::uint64_t end = gap_end();
       ++stats_.gaps_skipped;
       stats_.messages_lost += end - next_;
@@ -134,13 +154,17 @@ class Sequencer {
   void buffer(Bytes datagram, const Packet& p, std::uint64_t now_ns) {
     if (pending_.contains(p.header.sequence)) {
       stats_.duplicates += p.message_count();
-    } else if (pending_.size() >= config_.max_buffered_packets) {
+    } else if (pending_.size() >= config_.max_buffered_packets ||
+               pending_bytes_ + datagram.size() > config_.max_buffered_bytes) {
       ++stats_.buffer_overflows;  // still covered by upstream_next_, so it will be re-requested
     } else {
       ++stats_.out_of_order_packets;
+      pending_bytes_ += datagram.size();
       pending_.emplace(p.header.sequence, Buffered{{datagram.begin(), datagram.end()}, now_ns});
     }
   }
+
+  static std::uint64_t elapsed(std::uint64_t now, std::uint64_t since) { return now > since ? now - since : 0; }
 
   template <class Deliver>
   void deliver_packet(const Packet& p, Deliver& deliver) {
@@ -163,6 +187,7 @@ class Sequencer {
   void drain(Deliver& deliver) {
     while (!pending_.empty() && pending_.begin()->first <= next_) {
       auto node = pending_.extract(pending_.begin());
+      pending_bytes_ -= node.mapped().datagram.size();
       Packet p;
       (void)parse(node.mapped().datagram, p);  // validated before it was buffered
       if (p.next_sequence() <= next_) {
@@ -187,6 +212,7 @@ class Sequencer {
     std::uint64_t arrival_ns;
   };
   std::map<std::uint64_t, Buffered> pending_;  // out-of-order packets by first sequence
+  std::size_t pending_bytes_ = 0;
   std::uint64_t upstream_advanced_ns_ = 0;
   bool end_of_session_ = false;
   std::uint64_t attempts_for_ = std::numeric_limits<std::uint64_t>::max();

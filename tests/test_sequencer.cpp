@@ -159,6 +159,38 @@ TEST_F(SequencerTest, WithoutRetransmissionHolesAgeInParallel) {
   EXPECT_EQ(s.stats().gaps_skipped, 3u);
 }
 
+// A corrupted or forged sequence far beyond anything plausible must not open a hole that stalls
+// the receiver: it is rejected and counted, and the real stream carries on.
+TEST_F(SequencerTest, ImplausibleSequenceJumpIsRejected) {
+  Sequencer s;
+  feed(s, pkt(1, 2));
+  feed(s, make_heartbeat(log.session(), 1ULL << 63));
+  auto far = pkt(3, 1);
+  store_be64(far.data() + 10, (1ULL << 32) + 100);
+  feed(s, far);
+  EXPECT_EQ(s.stats().implausible_sequences, 2u);
+  EXPECT_FALSE(s.has_gap());
+  feed(s, pkt(3, 3));
+  EXPECT_EQ(delivered, range(1, 5));
+  EXPECT_FALSE(timer(s, 0));
+}
+
+TEST_F(SequencerTest, ReorderBufferIsBoundedInBytesToo) {
+  SequencerConfig cfg;
+  cfg.max_buffered_bytes = 100;
+  Sequencer s(cfg);
+  feed(s, pkt(1, 1));
+  feed(s, pkt(3, 2));  // 20 + 2*10 = 40 bytes: fits
+  feed(s, pkt(5, 2));  // 40 more: fits (80)
+  feed(s, pkt(7, 2));  // would make 120 > 100: dropped, recovered later by request
+  EXPECT_EQ(s.stats().out_of_order_packets, 2u);
+  EXPECT_EQ(s.stats().buffer_overflows, 1u);
+  for (int i = 0; i < 10 && s.has_gap(); ++i) {
+    if (auto req = timer(s, static_cast<std::uint64_t>(i) * 1'000'000'000)) feed(s, *log.answer(*req, 1400));
+  }
+  EXPECT_EQ(delivered, range(1, 8));
+}
+
 TEST_F(SequencerTest, RejectsOtherSessionsAndMalformedPackets) {
   SequencerConfig cfg;
   cfg.session = make_session("TEST");
