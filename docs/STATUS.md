@@ -52,6 +52,9 @@ Nothing required by the brief is open. Possible next steps:
 
 All builds use `-Werror`. Both fuzzers ran 60 s with no findings.
 
+Latest verified commit: `2577cac`. GitHub Actions run 41460571282 passed all six jobs (GCC 14 and
+clang 18 in Release and ASan+UBSan, clang 18 TSan, libFuzzer).
+
 ## Known issues
 
 - Benchmarks were recorded while unrelated processes kept the machine loaded (load average about
