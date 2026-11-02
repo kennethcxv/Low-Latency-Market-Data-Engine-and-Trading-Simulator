@@ -1,0 +1,26 @@
+# Build trees
+/build/
+/build-*/
+/out/
+CMakeUserPresets.json
+compile_commands.json
+.cache/
+
+# Generated fixtures and benchmark scratch output (regenerate with `mde gen`)
+/data/
+*.itch
+*.mold
+!tests/golden/*.itch
+
+# Fuzzer artifacts
+crash-*
+leak-*
+timeout-*
+oom-*
+/fuzz/corpus-*/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
