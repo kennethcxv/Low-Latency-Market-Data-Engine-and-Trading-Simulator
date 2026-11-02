@@ -2,6 +2,8 @@ add_library(mde_common INTERFACE)
 target_include_directories(mde_common INTERFACE ${PROJECT_SOURCE_DIR}/include)
 target_compile_features(mde_common INTERFACE cxx_std_20)
 
+find_package(Threads REQUIRED)
+
 add_library(mde_itch INTERFACE)
 target_link_libraries(mde_itch INTERFACE mde_common)
 
@@ -16,3 +18,6 @@ target_link_libraries(mde_moldudp64 PUBLIC mde_common PRIVATE mde_warnings)
 
 add_library(mde_net STATIC net/udp.cpp net/session.cpp)
 target_link_libraries(mde_net PUBLIC mde_moldudp64 PRIVATE mde_warnings)
+
+add_library(mde_pipeline INTERFACE)
+target_link_libraries(mde_pipeline INTERFACE mde_common Threads::Threads)
