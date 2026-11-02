@@ -5,8 +5,10 @@
 
 #include <array>
 #include <cstdint>
+#include <variant>
 #include <vector>
 
+#include "mde/common.hpp"
 #include "mde/sim/exchange.hpp"
 
 namespace mde::sim {
@@ -27,6 +29,25 @@ struct SimSummary {
   std::int64_t traded_quantity = 0;
   std::array<std::uint64_t, kRejectReasonCount> rejects{};
   std::uint64_t digest = 0;  // over every execution report, in order
+};
+
+// The simulator's request stream. Feed every execution report back through observe() so that
+// cancels target orders the agent believes are live.
+class OrderFlow {
+ public:
+  using Request = std::variant<NewOrder, CancelOrder>;
+  explicit OrderFlow(const SimConfig& config);
+  Request next();
+  void observe(const ExecutionReport& report);
+
+ private:
+  void forget(AccountId account, ClientOrderId id);
+
+  SimConfig config_;
+  Rng rng_;
+  std::vector<Price> reference_;
+  std::vector<ClientOrderId> next_client_id_;
+  std::vector<std::vector<ClientOrderId>> live_;  // client ids believed live, per account
 };
 
 // Runs the simulation. If `reports` is given, every execution report is appended to it.
