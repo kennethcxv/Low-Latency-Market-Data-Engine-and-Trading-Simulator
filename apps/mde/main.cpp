@@ -300,8 +300,8 @@ int cmd_replay(const std::vector<std::string_view>& raw) {
   print_sequencer_stats(result.stats);
   print_pipeline_stats(pipeline);
   std::printf("\n");
-  int rc = finish_report(builder, check, args.number("--top", 10));
-  return result.complete ? rc : 1;
+  const int rc = finish_report(builder, check, args.number("--top", 10));
+  return result.complete && result.stats.messages_lost == 0 ? rc : 1;
 }
 
 int cmd_serve(const std::vector<std::string_view>& raw) {
@@ -357,15 +357,17 @@ int cmd_listen(const std::vector<std::string_view>& raw) {
   const bool check = args.has("--check");
   mde::book::ReferenceMarket market;
   mde::book::BookBuilder builder(market, check);
-  mde::moldudp64::SequencerStats stats;
+  mde::net::ReceiveResult result;
   const auto idle = std::chrono::milliseconds(args.number("--idle-ms", 5000));
   const auto pipeline = drive(args.text("--pipeline", "spsc"), builder, [&](auto&& deliver) {
-    stats = mde::net::receive_session(socket, rerequest, {}, idle, deliver);
+    result = mde::net::receive_session(socket, rerequest, {}, idle, deliver);
   });
-  print_sequencer_stats(stats);
+  std::printf("session %s\n", result.complete ? "complete" : "INCOMPLETE (idle timeout before end of session)");
+  print_sequencer_stats(result.stats);
   print_pipeline_stats(pipeline);
   std::printf("\n");
-  return finish_report(builder, check, args.number("--top", 10));
+  const int rc = finish_report(builder, check, args.number("--top", 10));
+  return result.complete && result.stats.messages_lost == 0 ? rc : 1;
 }
 
 int cmd_sim(const std::vector<std::string_view>& raw) {

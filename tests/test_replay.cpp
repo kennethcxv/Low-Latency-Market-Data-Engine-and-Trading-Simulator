@@ -103,13 +103,14 @@ TEST(Replay, UdpLoopbackRecoversDeliberateLoss) {
   book::ReferenceMarket market;
   book::BookBuilder builder(market);
   const auto rerequest = net::parse_endpoint("127.0.0.1:" + std::to_string(publisher_socket.local_port()));
-  const auto stats = net::receive_session(receiver, rerequest, {}, std::chrono::milliseconds(3000),
-                                          [&](std::uint64_t, Bytes msg) { builder.apply(msg); });
+  const auto [stats, complete] = net::receive_session(receiver, rerequest, {}, std::chrono::milliseconds(3000),
+                                                      [&](std::uint64_t, Bytes msg) { builder.apply(msg); });
   stop = true;
   server.join();
 
   EXPECT_GT(published.packets_dropped, 0u);
   EXPECT_GT(published.retransmissions, 0u);
+  EXPECT_TRUE(complete);
   EXPECT_EQ(stats.messages_lost, 0u);
   EXPECT_EQ(stats.delivered, log.size());
   EXPECT_EQ(book::state_digest(market), direct_digest());

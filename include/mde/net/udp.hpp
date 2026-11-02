@@ -38,8 +38,10 @@ class UdpSocket {
   void send_to(Bytes data, const Endpoint& to);
 
   std::uint16_t local_port() const;
-  // Kernel receive buffer actually granted (Linux caps requests at net.core.rmem_max).
+  // Kernel receive buffer actually granted (Linux caps requests at net.core.rmem_max; it also
+  // reports double the requested value to account for bookkeeping).
   int receive_buffer_bytes() const;
+  void set_receive_buffer(int bytes);
   // For multicast publishing: TTL and whether our own host receives what we send.
   void set_multicast(int ttl, bool loopback, const std::string& interface_address = "0.0.0.0");
 

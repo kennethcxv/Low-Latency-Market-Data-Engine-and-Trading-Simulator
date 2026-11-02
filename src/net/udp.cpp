@@ -131,6 +131,10 @@ int UdpSocket::receive_buffer_bytes() const {
   return size;
 }
 
+void UdpSocket::set_receive_buffer(int bytes) {
+  if (setsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &bytes, sizeof bytes) != 0) fail("SO_RCVBUF");
+}
+
 void UdpSocket::set_multicast(int ttl, bool loopback, const std::string& interface_address) {
   const unsigned char ttl_byte = static_cast<unsigned char>(ttl);
   const unsigned char loop_byte = loopback ? 1 : 0;

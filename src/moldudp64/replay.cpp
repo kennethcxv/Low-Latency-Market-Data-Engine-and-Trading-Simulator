@@ -51,13 +51,23 @@ std::vector<std::vector<std::uint8_t>> impair(const std::vector<std::vector<std:
   Rng rng(impairments.seed);
   std::vector<std::vector<std::uint8_t>> out;
   std::vector<std::pair<std::size_t, std::size_t>> held;  // (release after this many emitted, packet index)
+  std::size_t burst_left = 0;
   for (std::size_t i = 0; i < packets.size(); ++i) {
-    if (rng.chance(impairments.drop)) continue;
+    if (burst_left > 0 || rng.chance(impairments.drop)) {
+      burst_left = burst_left > 0 ? burst_left - 1 : impairments.burst - 1;
+      continue;
+    }
+    if (rng.chance(impairments.garbage)) {
+      std::vector<std::uint8_t> junk(rng.below(64));
+      for (auto& b : junk) b = static_cast<std::uint8_t>(rng.next());
+      out.push_back(std::move(junk));
+    }
     if (rng.chance(impairments.reorder)) {
       held.emplace_back(out.size() + 1 + rng.below(8), i);
       continue;
     }
     out.push_back(packets[i]);
+    if (rng.chance(impairments.corrupt)) out.back().resize(rng.below(out.back().size()));
     if (rng.chance(impairments.duplicate)) out.push_back(packets[i]);
     for (std::size_t h = 0; h < held.size();) {
       if (held[h].first <= out.size()) {

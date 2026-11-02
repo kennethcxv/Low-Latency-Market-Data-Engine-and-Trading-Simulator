@@ -35,12 +35,17 @@ struct PublishStats {
 PublishStats publish(UdpSocket& socket, const moldudp64::MessageLog& log, const PublishOptions& options,
                      const std::atomic<bool>& stop);
 
+struct ReceiveResult {
+  moldudp64::SequencerStats stats;
+  bool complete = false;  // end of session seen and nothing missing (lost messages were skipped)
+};
+
 // Receives one session on `socket` until end of session with nothing missing, or until no packet
 // has arrived for `idle_timeout`. Re-requests go to `rerequest_server` from the same socket, as
 // the spec intends, so retransmissions arrive where the data does. Without a server, holes are
 // skipped after the sequencer's timeout.
 template <class Deliver>
-moldudp64::SequencerStats receive_session(UdpSocket& socket, const std::optional<Endpoint>& rerequest_server,
+ReceiveResult receive_session(UdpSocket& socket, const std::optional<Endpoint>& rerequest_server,
                                           moldudp64::SequencerConfig config, std::chrono::milliseconds idle_timeout,
                                           Deliver&& deliver) {
   using Clock = std::chrono::steady_clock;
@@ -61,7 +66,7 @@ moldudp64::SequencerStats receive_session(UdpSocket& socket, const std::optional
     }
     while (auto request = seq.on_timer(now_ns, deliver)) socket.send_to(moldudp64::encode(*request), *rerequest_server);
   }
-  return seq.stats();
+  return {seq.stats(), seq.complete()};
 }
 
 }  // namespace mde::net

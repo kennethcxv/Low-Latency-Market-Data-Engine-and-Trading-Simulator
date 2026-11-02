@@ -10,7 +10,8 @@ add_executable(mde_tests
   test_sequencer.cpp
   test_replay.cpp
   test_pipeline.cpp
-  test_sim.cpp)
+  test_sim.cpp
+  test_stress.cpp)
 target_link_libraries(mde_tests PRIVATE mde_book mde_synth mde_moldudp64 mde_net mde_pipeline mde_sim mde_itch mde_warnings GTest::gtest_main)
 
 include(GoogleTest)

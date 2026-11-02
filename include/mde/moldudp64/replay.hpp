@@ -40,9 +40,12 @@ struct Impairments {
   double duplicate = 0;  // probability a packet is delivered twice
   double reorder = 0;    // probability a packet is held back behind up to 8 later packets
   std::uint64_t seed = 1;
+  std::size_t burst = 1;  // each drop loses this many consecutive packets
+  double corrupt = 0;     // probability a packet arrives truncated at a random byte
+  double garbage = 0;     // probability a random datagram from another session is injected
 };
 
-// Applies seeded drop/duplicate/reorder to a packet sequence, in order.
+// Applies seeded drop/duplicate/reorder/corruption to a packet sequence, in order.
 std::vector<std::vector<std::uint8_t>> impair(const std::vector<std::vector<std::uint8_t>>& packets,
                                               const Impairments& impairments);
 
