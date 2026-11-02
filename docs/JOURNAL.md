@@ -45,3 +45,49 @@ Spec details that changed the design:
 (`kennethcxv/Low-Latency-Market-Data-Engine-and-Trading-Simulator`, public) and asked for commits
 and pushes there. That differs from the name in the original brief (`market-data-engine`). The
 user's explicit instruction was followed.
+
+**Process change (requested mid-milestone).** From milestone 2 onward, each milestone ends
+with a review by the user. Pushes to GitHub happen only after the user authorizes them.
+Milestone 1 was committed locally and had not been pushed when this was agreed.
+
+## 2026-11-02 — Milestone 2: build system and ITCH decoder
+
+**Decoder design.** Each message struct declares its fields in wire order with a
+`MDE_WIRE_FIELDS(...)` macro. The macro yields a `std::tie` of the members. One generic
+routine walks that tuple to decode, and another walks it to encode. The alternative
+considered was 23 hand-written decode functions and 23 encode functions. The generic version
+has two concrete advantages:
+
+- The wire size of each struct is computed at compile time and `static_assert`ed against the
+  length taken from the spec table. A wrong field width or a missing field fails the build.
+- There is one decode path to review instead of 46 near-identical functions.
+
+The cost is a little template code (`detail::width`, `get`, `put`) that a reader has to
+understand once.
+
+**Checked, not assumed:** at `-O2` (Apple clang 21, arm64), `read<AddOrder>` compiles to
+straight-line code. Each field becomes a constant-offset load, a `rev` byte swap and a store,
+with no loop and no call. That is the same code a hand-written decoder would produce.
+
+**Validation policy.**
+
+- Lengths must match exactly. A message that is too long is rejected, not truncated.
+- Only fields that change book or volume semantics are validated: Buy/Sell must be `B` or
+  `S`, and Printable must be `Y` or `N`.
+- Every rejection is a `DecodeStatus` value. Nothing throws on the data path.
+
+**Problems hit.**
+
+- GoogleTest's CMake project enables C, so Linux builds need `CMAKE_C_COMPILER` set alongside
+  the C++ compiler. CI passes both.
+- Apple clang 21 emits `-Wcharacter-conversion` inside GoogleTest's own `gtest-printers.h`.
+  The warning comes from googletest's translation units, not ours. `-Werror` applies only to
+  project targets, so it doesn't break the build.
+
+**Tests run.** 32 tests: byte order, framing, a hand-checked AddOrder vector with distinct
+bytes per field, 2,000 random encode/read round trips per message type (23 types), and basic
+rejections. All pass in these configurations:
+
+- macOS (Apple clang 21): Debug, and ASan+UBSan.
+- Ubuntu 24.04 in Docker: GCC 14 and clang 18, each plain and with ASan+UBSan, all with
+  `-Werror`.
