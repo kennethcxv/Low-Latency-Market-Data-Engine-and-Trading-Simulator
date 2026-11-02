@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -24,6 +25,7 @@
 #include "mde/itch/format.hpp"
 #include "mde/moldudp64/replay.hpp"
 #include "mde/net/session.hpp"
+#include "mde/pipeline/pipeline.hpp"
 #include "mde/synth/generator.hpp"
 
 namespace {
@@ -243,11 +245,39 @@ void print_sequencer_stats(const mde::moldudp64::SequencerStats& s) {
               s.messages_lost, s.malformed_packets, s.session_mismatches, s.buffer_overflows);
 }
 
+// Feeds every message `source` delivers to `builder`: inline on this thread ("none"), or on a
+// separate book thread behind an SPSC ring or the mutex-queue baseline.
+template <class Builder, class Source>
+std::optional<mde::pipeline::PipelineStats> drive(const std::string& mode, Builder& builder, Source&& source) {
+  using mde::pipeline::MessageSlot;
+  if (mode == "none") {
+    source([&](std::uint64_t, mde::Bytes m) { builder.apply(m); });
+    return std::nullopt;
+  }
+  auto consume = [&](const MessageSlot& slot) { builder.apply(mde::Bytes(slot.data, slot.length)); };
+  auto produce = [&](auto& push) { source([&](std::uint64_t, mde::Bytes m) { push(0, m); }); };
+  if (mode == "spsc") {
+    auto queue = std::make_unique<mde::pipeline::SpscQueue<MessageSlot, 1 << 16>>();
+    return mde::pipeline::run(*queue, produce, consume);
+  }
+  if (mode == "mutex") {
+    auto queue = std::make_unique<mde::pipeline::MutexQueue<MessageSlot, 1 << 16>>();
+    return mde::pipeline::run(*queue, produce, consume);
+  }
+  throw std::invalid_argument("--pipeline must be none, spsc or mutex");
+}
+
+void print_pipeline_stats(const std::optional<mde::pipeline::PipelineStats>& p) {
+  if (!p) return;
+  std::printf("pipeline: %" PRIu64 " messages handed to the book thread, %" PRIu64 " full-queue waits, %" PRIu64 " oversized\n",
+              p->messages, p->full_waits, p->oversized);
+}
+
 int cmd_replay(const std::vector<std::string_view>& raw) {
   const Args args(raw, {"--no-retransmit", "--check"});
   if (args.positional().size() != 1) {
     std::fprintf(stderr, "usage: mde replay FILE [--drop P] [--dup P] [--reorder P] [--seed N] [--no-retransmit]\n"
-                         "                        [--packet-size BYTES] [--check] [--top N]\n");
+                         "                        [--packet-size BYTES] [--pipeline none|spsc|mutex] [--check] [--top N]\n");
     return 2;
   }
   const std::vector<std::uint8_t> file = read_file(args.positional()[0]);
@@ -261,10 +291,13 @@ int cmd_replay(const std::vector<std::string_view>& raw) {
   const bool check = args.has("--check");
   mde::book::ReferenceMarket market;
   mde::book::BookBuilder builder(market, check);
-  const auto result = mde::moldudp64::replay(log, options, [&](std::uint64_t, mde::Bytes msg) { builder.apply(msg); });
+  mde::moldudp64::ReplayResult result;
+  const auto pipeline = drive(args.text("--pipeline", "none"), builder,
+                              [&](auto&& deliver) { result = mde::moldudp64::replay(log, options, deliver); });
   std::printf("published %" PRIu64 " packets, %" PRIu64 " retransmissions, session %s\n", result.packets_sent,
               result.retransmissions, result.complete ? "complete" : "INCOMPLETE");
   print_sequencer_stats(result.stats);
+  print_pipeline_stats(pipeline);
   std::printf("\n");
   int rc = finish_report(builder, check, args.number("--top", 10));
   return result.complete ? rc : 1;
@@ -307,7 +340,7 @@ int cmd_listen(const std::vector<std::string_view>& raw) {
   const Args args(raw, {"--check"});
   if (!args.has("--port")) {
     std::fprintf(stderr, "usage: mde listen --port N [--bind IP] [--group IP] [--interface IP]\n"
-                         "                  [--rerequest IP:PORT] [--idle-ms N] [--check] [--top N]\n");
+                         "                  [--rerequest IP:PORT] [--idle-ms N] [--pipeline spsc|mutex|none] [--check] [--top N]\n");
     return 2;
   }
   std::optional<mde::net::Endpoint> rerequest;
@@ -323,9 +356,13 @@ int cmd_listen(const std::vector<std::string_view>& raw) {
   const bool check = args.has("--check");
   mde::book::ReferenceMarket market;
   mde::book::BookBuilder builder(market, check);
-  const auto stats = mde::net::receive_session(socket, rerequest, {}, std::chrono::milliseconds(args.number("--idle-ms", 5000)),
-                                               [&](std::uint64_t, mde::Bytes msg) { builder.apply(msg); });
+  mde::moldudp64::SequencerStats stats;
+  const auto idle = std::chrono::milliseconds(args.number("--idle-ms", 5000));
+  const auto pipeline = drive(args.text("--pipeline", "spsc"), builder, [&](auto&& deliver) {
+    stats = mde::net::receive_session(socket, rerequest, {}, idle, deliver);
+  });
   print_sequencer_stats(stats);
+  print_pipeline_stats(pipeline);
   std::printf("\n");
   return finish_report(builder, check, args.number("--top", 10));
 }
