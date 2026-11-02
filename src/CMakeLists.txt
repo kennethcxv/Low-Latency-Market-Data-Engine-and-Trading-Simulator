@@ -7,7 +7,7 @@ find_package(Threads REQUIRED)
 add_library(mde_itch INTERFACE)
 target_link_libraries(mde_itch INTERFACE mde_common)
 
-add_library(mde_book STATIC book/reference_market.cpp)
+add_library(mde_book STATIC book/reference_market.cpp book/fast_market.cpp)
 target_link_libraries(mde_book PUBLIC mde_itch PRIVATE mde_warnings)
 
 add_library(mde_synth STATIC synth/generator.cpp)

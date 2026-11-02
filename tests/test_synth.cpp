@@ -3,6 +3,7 @@
 #include <set>
 
 #include "mde/book/book_builder.hpp"
+#include "mde/book/fast_market.hpp"
 #include "mde/book/reference_market.hpp"
 #include "mde/synth/generator.hpp"
 
@@ -67,6 +68,14 @@ TEST(Synth, OutputIsIdenticalAcrossPlatforms) {
   Bytes msg;
   while (reader.next(msg) == FramedReader::Status::kOk) builder.apply(msg);
   EXPECT_EQ(book::state_digest(market), 0x957f5e6f309af593ULL) << std::hex << book::state_digest(market);
+
+  book::FastMarket fast;
+  book::BookBuilder fast_builder(fast, /*check_invariants=*/true);
+  FramedReader again{data};
+  while (again.next(msg) == FramedReader::Status::kOk) fast_builder.apply(msg);
+  EXPECT_EQ(book::state_digest(fast), 0x957f5e6f309af593ULL);
+  EXPECT_EQ(fast_builder.counters().invariant_violations, 0u) << fast_builder.first_violation();
+  EXPECT_EQ(fast.check_all_invariants(), "");
 }
 
 TEST(Synth, RejectsUnusableConfigs) {

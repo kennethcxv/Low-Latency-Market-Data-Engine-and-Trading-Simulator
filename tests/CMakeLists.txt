@@ -3,7 +3,7 @@ add_executable(mde_tests
   test_itch_codec.cpp
   test_itch_golden.cpp
   test_itch_malformed.cpp
-  test_reference_market.cpp
+  test_market.cpp
   test_book_builder.cpp
   test_synth.cpp
   test_moldudp64.cpp
