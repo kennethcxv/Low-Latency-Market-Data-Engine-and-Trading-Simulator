@@ -1,189 +1,341 @@
 # Technical Design
 
-Status: living document. Sections marked *(planned)* describe intent that is not yet implemented;
-everything else describes code that exists in this repository.
+This document describes the system as built. Its history, including what changed and why, is in
+[JOURNAL.md](JOURNAL.md). Measurements are in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## 1. Scope
 
-The system ingests Nasdaq TotalView-ITCH 5.0 market data carried over MoldUDP64, reconstructs a
-full-depth limit order book per instrument, and exposes top-of-book, depth, spread and volume.
-A separate, self-contained component simulates order entry, pre-trade risk and matching.
+The system ingests Nasdaq TotalView-ITCH 5.0 market data carried over MoldUDP64. It rebuilds a
+full-depth limit order book for each instrument and exposes best bid/ask, spread, depth, order
+queues and volume. A separate component simulates order entry, pre-trade risk checks and
+matching.
 
-Non-goals: connecting to a real exchange or broker, redistributing exchange data, SoupBinTCP,
-GLIMPSE snapshot recovery, and kernel-bypass networking. These are listed again under
-limitations with the reason they are out of scope.
+Out of scope:
+
+- connecting to a real exchange or broker;
+- redistributing exchange data;
+- SoupBinTCP and GLIMPSE snapshot recovery;
+- kernel-bypass networking.
+
+Section 9 explains what each omission means in practice.
 
 ## 2. Sources
 
-All protocol behaviour is taken from the two official Nasdaq documents, read in full before
-any code was written:
+All protocol behaviour comes from the two official Nasdaq documents. Both were read in full before
+any code was written.
 
-| Document | Version read | Where |
+| Document | Version read |
+|---|---|
+| Nasdaq TotalView-ITCH 5.0 | revision log ending April 28, 2023 (adds the DLCR message) |
+| MoldUDP64 Protocol Specification | V1.00, formatting update 8/2/24 |
+
+Where this project takes a position the specifications leave open, the choice is marked
+**policy**.
+
+## 3. Protocol facts the design depends on
+
+### MoldUDP64
+
+A downstream packet has a 20-byte header: session (10 ASCII bytes), the sequence number of its
+first message (u64), and a message count (u16). The header is followed by `count` message blocks,
+each a big-endian u16 length and that many bytes. A count of `0` is a heartbeat and `0xFFFF` marks
+end of session. Both carry the **next** sequence number, so a receiver can detect messages lost at
+the end of a burst even when no data follows.
+
+A re-request is a 20-byte packet (session, first sequence, count) sent to a re-request server. The
+server answers with an ordinary downstream packet unicast back to the requesting socket. It may
+return fewer messages than asked if they don't fit in one datagram.
+
+### ITCH 5.0
+
+Every message begins with an 11-byte header: type, stock locate (u16), tracking number (u16) and
+timestamp (6 bytes, nanoseconds since midnight). Integers are big-endian. Prices are fixed-point
+integers: `Price(4)` has 4 implied decimals, `Price(8)` has 8. There are 23 message types, each
+with one fixed length. All 23 lengths are checked against the spec at compile time.
+
+| Affects the book | Affects volume only | Neither |
 |---|---|---|
-| Nasdaq TotalView-ITCH 5.0 | revision log ends April 28, 2023 (DLCR message added) | nasdaqtrader.com `NQTVITCHspecification.pdf` |
-| MoldUDP64 Protocol Specification | V1.00, formatting update 8/2/24 | nasdaqtrader.com `moldudp64.pdf` |
+| `A` `F` add, `E` `C` execute, `X` cancel, `D` delete, `U` replace | `P` trade (non-displayed orders), `Q` cross | `S` `R` `H` `Y` `L` `V` `W` `K` `J` `h` `I` `N` `O`, `B` (broken trade) |
 
-The specifications are not redistributed here. Where this project takes a position the
-specifications do not dictate (for example, what to do with a malformed packet), the decision
-and its reason are recorded in this document and labelled **policy**, not protocol.
+The details that matter:
 
-## 3. Protocol analysis
+- **`P` reports executions of non-displayed orders.** No Add was ever sent for those orders, so
+  applying `P` to the book would be wrong.
+- **A `C` with Printable = `N` is reported again in a later bulk print**, usually the cross. It
+  reduces the order but must not count toward volume.
+- **The book reduction for `C` happens at the resting order's price**, not at the execution price
+  carried in the message.
+- **`U` doesn't transmit side, symbol or attribution.** They carry over from the original order,
+  and the replacement loses time priority.
+- **Order reference numbers are unique for the day, but not guaranteed to increase.** That
+  guarantee was removed in 2009, so they can't be used as array indices.
+- **Stock locate codes are dense and start at 1 each day.** The spec intends them as array
+  indices.
+- **The book can be locked or crossed before the opening cross.** "Bid < ask" is therefore
+  reported, never asserted.
 
-### 3.1 MoldUDP64
+The offline file format is Nasdaq's historical ITCH files: the same `[u16 length][message]`
+framing as a MoldUDP64 message block. One bounds-checked reader (`mde::FramedReader`) handles both.
 
-Downstream packet = 20-byte header followed by `Message Count` message blocks.
+## 4. Architecture
 
-| Field | Offset | Length | Notes |
-|---|---|---|---|
-| Session | 0 | 10 | ASCII |
-| Sequence Number | 10 | 8 | sequence number of the *first* message in the packet; later messages are numbered implicitly |
-| Message Count | 18 | 2 | `0` = heartbeat, `0xFFFF` = end of session |
-
-Each message block is a 2-byte big-endian length (excluding itself) and that many data bytes.
-Zero-length messages are legal. All MoldUDP64 integers are big-endian.
-
-Heartbeats and end-of-session packets carry the **next expected** sequence number. That is what
-lets a receiver detect loss at the tail of a burst during quiet periods: if a heartbeat says
-"next is 1001" and we have only seen up to 990, ten messages are missing.
-
-Request packet (to a re-request server, unicast): Session (10), Sequence Number (8), Requested
-Message Count (2). The response is an ordinary downstream packet unicast back to the requester's
-socket. A server returns only as many messages as fit in one UDP payload, so a receiver must be
-prepared to issue follow-up requests for the remainder.
-
-The spec's reference receiver aborts on a session mismatch and re-requests from the next
-expected number on any gap.
-
-### 3.2 ITCH 5.0
-
-Every message starts with the same 11-byte header: type (1), stock locate (2), tracking number
-(2), timestamp (6 bytes, nanoseconds since midnight). Integers are big-endian and unsigned. Alpha
-fields are left-justified ASCII padded with spaces. `Price(4)` is a 32-bit integer with four
-implied decimals (max 200,000.0000 = `0x77359400`); `Price(8)` (MWCB levels only) has eight.
-
-Message types and fixed lengths, computed from the field tables:
-
-| Type | Message | Length | Book impact |
-|---|---|---|---|
-| `S` | System Event | 12 | none (session state) |
-| `R` | Stock Directory | 39 | binds locate to symbol |
-| `H` | Stock Trading Action | 25 | none (trading state) |
-| `Y` | Reg SHO Restriction | 20 | none |
-| `L` | Market Participant Position | 26 | none |
-| `V` | MWCB Decline Level | 35 | none |
-| `W` | MWCB Status | 12 | none |
-| `K` | IPO Quoting Period Update | 28 | none |
-| `J` | LULD Auction Collar | 35 | none |
-| `h` | Operational Halt | 21 | none |
-| `A` | Add Order (no MPID) | 36 | add |
-| `F` | Add Order (MPID) | 40 | add |
-| `E` | Order Executed | 31 | reduce; counts toward volume |
-| `C` | Order Executed With Price | 36 | reduce; volume only if Printable = `Y` |
-| `X` | Order Cancel | 23 | reduce |
-| `D` | Order Delete | 19 | remove |
-| `U` | Order Replace | 35 | remove old, add new (loses priority) |
-| `P` | Trade (non-cross) | 44 | **none** — non-displayed orders; volume only |
-| `Q` | Cross Trade | 40 | none; bulk cross volume (8-byte shares) |
-| `B` | Broken Trade | 19 | none; affects trade statistics only |
-| `I` | NOII | 50 | none |
-| `N` | Retail Price Improvement Indicator | 20 | none |
-| `O` | DLCR Price Discovery | 48 | none |
-
-Points from the specification that drive the design:
-
-* **Full-depth vs. trade reporting.** `A/F/E/C/X/D/U` describe displayed orders and are the only
-  messages that change the book. `P` reports executions of *non-displayed* orders: there was
-  never an Add for them, so applying `P` to the book would be wrong. `Q` is one bulk print per
-  cross. The engine therefore keeps two separate accumulators: book state and trade statistics.
-* **Non-printable executions.** A `C` with Printable = `N` will be included in a later bulk print
-  (typically the cross). Counting it would double count volume, so it reduces the order but is
-  excluded from volume.
-* **`C` price vs. order price.** The execution price on `C` may differ from the resting order's
-  display price. The book reduction applies at the order's price, not the execution price.
-* **Replace semantics.** Side, symbol and attribution cannot change on `U` and are not
-  transmitted; they must be carried over from the original order. The new reference number is
-  used for all later updates and the order loses time priority.
-* **Order reference numbers.** Day-unique, but the 2009 revision deliberately removed "increasing".
-  They cannot be used as dense array indices; an associative index is required.
-* **Stock locate codes.** Assigned daily starting at 1 and documented as intended for use as an
-  array index. A flat `65536`-entry table keyed by locate is the intended access pattern, and
-  every message carries the locate at the same offset.
-* **`P` Buy/Sell is always `B`** since 2014 and the order reference is zero since 2010, so no
-  information about the resting side can be inferred from it.
-* **Crossed books are not a protocol violation.** Before the opening cross, orders accumulate and
-  the Nasdaq book can be locked or crossed until the cross executes. "Best bid < best ask" is
-  therefore reported as an observation, never asserted as an invariant.
-
-### 3.3 Framing of offline files
-
-Nasdaq's historical TotalView-ITCH files use the same framing as a MoldUDP64 message block: a
-2-byte big-endian length followed by the message. The same bounds-checked block reader serves
-both. This project does **not** ship any Nasdaq data; all fixtures are produced by the synthetic
-generator described below and are labelled as synthetic.
-
-## 4. Architecture (proposed at milestone 1)
-
-```
-             +-----------------------------------------------------------+
-  UDP / file |  feed thread                                              |
-  --------->  |  MoldUDP64 parse --> Sequencer --(in-order msgs)--> queue |---+
-             |      ^   (validate   (gap/dup/reorder,                    |   |
-             |      |    whole       re-request timer)                   |   |
-             |      |    packet)          |                              |   |
-             |      +---- retransmits <---+ Request packets ----> re-request server
-             +-----------------------------------------------------------+   |
-                                                                             v
-             +-----------------------------------------------------------+
-             |  book thread (sole owner of all book state, no locks)     |
-             |  ITCH decode --> BookBuilder --> Market (per-locate books) |
-             |                       |                                   |
-             |                       +--> trade statistics (volume, etc) |
-             +-----------------------------------------------------------+
-
-  Separate, independent of ITCH:
-     order entry --> pre-trade risk --> matching engine --> execution reports
+```mermaid
+flowchart LR
+  subgraph feed["feed thread"]
+    S[UDP socket or<br/>in-memory replay] --> P[MoldUDP64 parse<br/>whole-packet validation]
+    P --> Q[Sequencer<br/>gap / dup / reorder]
+    Q -- re-request --> R[(re-request server)]
+    R -- unicast retransmission --> S
+  end
+  Q -- "in-order messages<br/>64-byte slots" --> RING[[SPSC ring]]
+  subgraph book["book thread (owns all book state)"]
+    RING --> D[ITCH decode]
+    D --> B[BookBuilder]
+    B --> M[Market: per-locate books<br/>+ order index]
+    B --> T[trade statistics]
+  end
+  subgraph sim["mde_sim (independent of ITCH)"]
+    O[order entry] --> K[pre-trade risk] --> ME[matching engine] --> ER[execution reports]
+  end
 ```
 
-Libraries (one CMake target each, dependencies point downward only):
+Libraries (one CMake target each; dependencies point one way):
 
 | Target | Contents | Depends on |
 |---|---|---|
-| `mde_common` | byte-order loads/stores, deterministic PRNG, hashing | — |
-| `mde_itch` | ITCH 5.0 message types, decoder, encoder | common |
-| `mde_moldudp64` | packet parser/builder, sequencer, replay harness, UDP transport | common |
-| `mde_book` | reference and optimized markets, ITCH-to-book builder | itch |
-| `mde_pipeline` | SPSC ring, baseline mutex queue, two-thread pipeline | moldudp64, book |
+| `mde_common` | big-endian loads/stores, framing, `Rng`, `Digest` | — |
+| `mde_itch` | ITCH 5.0 message types, decoder, encoder, printer | common |
+| `mde_book` | `ReferenceMarket`, `FastMarket`, `BookBuilder` | itch |
+| `mde_moldudp64` | packet codec, `Sequencer`, `MessageLog`, lossy replay | common |
+| `mde_net` | POSIX UDP socket, publisher, receive loop | moldudp64 |
+| `mde_pipeline` | `SpscQueue`, `MutexQueue`, two-thread `run()` | common, Threads |
 | `mde_synth` | synthetic ITCH generator | itch, book |
-| `mde_sim` | order entry, risk checks, matching engine, simulator | common only |
+| `mde_sim` | `Exchange` (risk + matching), `OrderFlow`, simulator | common |
 
-Key decisions, each to be validated by tests or measurements:
+## 5. Component design
 
-1. **Validate a MoldUDP64 packet completely before delivering any message from it** (policy). A
-   corrupt packet is dropped whole and treated as loss; recovery then goes through the same
-   re-request path as a lost packet. This avoids ever applying half of a damaged packet.
-2. **Exact-length ITCH decoding** (policy). Each type has one length in the spec; a message whose
-   length differs is reported as malformed rather than partially parsed.
-3. **Sequencer as a pure state machine.** It takes packets and a caller-supplied clock and returns
-   in-order messages and re-request instructions. No sockets, no wall clock inside it, so every
-   loss/duplicate/reorder case is unit-testable and replay is deterministic.
-4. **One owner per piece of state.** The book thread owns every book. The only cross-thread
-   structure is the queue between the feed and book threads.
-5. **Reference first, optimized second.** A deliberately simple `std::map`/`std::list` market is
-   the oracle. The optimized market must produce identical state after every event under
-   randomized differential tests before any performance number is reported.
-6. **Determinism.** No wall-clock reads in the data path of replay, simulation or generation.
-   Randomness uses a fixed, self-implemented PRNG (not `<random>` distributions, whose output
-   differs between libstdc++ and libc++) so fixtures and digests are identical across platforms.
+### 5.1 ITCH codec
 
-## 5. Milestones
+Each message struct lists its fields in wire order through `MDE_WIRE_FIELDS(...)`. That produces a
+`std::tie` of its members, plus the field names for printing. One generic routine reads every
+message and one writes every message. The wire size of each struct is computed from its field
+types and `static_assert`ed against the spec length.
 
-1. Architecture and protocol analysis
-2. Build system and basic parser
-3. Protocol conformance and malformed-input tests
-4. Correct reference order book
-5. Market-data sequencing and replay
-6. Multithreaded pipeline
-7. Simulated order entry and risk checks
-8. Performance profiling and optimization
-9. Stress testing and failure handling
-10. Documentation, reproducibility, and release
+At `-O2`, `read<AddOrder>` compiles to straight-line code: a load at a constant offset, a byte
+swap and a store per field. That is what a hand-written decoder produces.
+
+**Rejected alternatives:**
+
+- **Packed structs read with `reinterpret_cast`.** That is undefined behaviour, still needs byte
+  swaps, and depends on alignment.
+- **46 hand-written read and write functions.** Twice the review surface, and no compile-time check
+  that a layout matches the spec.
+
+**Policy:**
+
+- A message whose length differs from its type's spec length is rejected, even if it is only
+  longer.
+- Only fields that change book or volume semantics are validated: Buy/Sell must be `B` or `S`,
+  Printable must be `Y` or `N`.
+- Rejections are `DecodeStatus` values. Nothing throws on the data path.
+
+### 5.2 MoldUDP64 sequencing (`moldudp64::Sequencer`)
+
+`parse()` checks the header and walks every block before reporting success.
+
+**Policy:** a datagram with a truncated block, trailing bytes, or a sequence+count that overflows is
+dropped whole. It is then indistinguishable from a lost packet and recovered the same way. That
+rules out ever applying half of a damaged packet.
+
+The sequencer is a pure state machine. Datagrams and timestamps go in; in-order messages and
+re-requests come out. It owns no socket and reads no clock, so every loss pattern can be unit-tested
+and offline replay is deterministic. It tracks:
+
+- `next_`: the next sequence number to deliver;
+- `upstream_next_`: the highest "next sequence" any packet or heartbeat has shown;
+- `pending_`: out-of-order packets keyed by first sequence, bounded at 4,096 by default.
+
+Delivery is exactly once and in order. Partly duplicated packets have only their new messages
+delivered; retransmissions may be split differently from the originals.
+
+**Gap policy (the spec leaves it to the receiver):**
+
+- A request covers only the hole up to the first buffered packet, at most `max_request_count`
+  messages. Requests repeat after `request_timeout_ns`, and any progress resets the retry budget.
+- After `max_request_attempts`, the hole is skipped. The skipped messages are counted in
+  `messages_lost` and delivery continues from the buffer. The book then knows it is incomplete;
+  later references to lost orders show up as `kUnknownOrder` anomalies, never crashes.
+- With re-requests disabled, a hole is skipped one timeout after it was *revealed*, meaning the
+  packet after it arrived. The first version started that timeout when the hole reached the head of
+  the line. Holes then expired one after another and overflowed the buffer; the journal entry for
+  milestone 5 has the numbers.
+
+**Rejected:** the spec's sample receiver ignores every packet after a gap until the re-request is
+answered. Under load that turns one lost packet into a re-request for everything sent in the
+meantime. Buffering the packets after the hole (bounded) and asking only for the hole avoids that.
+
+### 5.3 Order books
+
+Both markets implement the `book::Market` concept and the same `Result` policy for input that
+contradicts their state:
+
+- **Rejected with no side effects:** duplicate add, unknown order, locate mismatch, zero quantity.
+- **Clamped:** a reduce by more than the remaining size removes the order and reports
+  `kOverfill`.
+
+`BookBuilder<Market>` maps ITCH messages onto the market and keeps per-instrument statistics:
+volume, trade count, last price and trading state. With `check_invariants` enabled it fully
+validates the touched book after every event. `mde book --check` uses that mode.
+
+**`ReferenceMarket`** is the obviously-correct version: a `std::map` of levels per side, a
+`std::list` FIFO per level, and an `unordered_map` from order id to list iterator. Profiling it
+(see BENCHMARKS.md) put about 36% of samples in `malloc`/`free` and most of the rest in
+pointer-chasing.
+
+**`FastMarket`** keeps the same semantics with a different layout:
+
+- **Orders:** a pool (`std::vector<Order>`, 32 bytes each) with a free list. Levels link their
+  orders in a FIFO by 32-bit pool indices. Nothing is allocated per order once warm.
+- **Order index:** open addressing with linear probing and Fibonacci hashing, kept at most half
+  full. Deletion uses backward shift instead of tombstones, so probe lengths don't degrade over a
+  day of adds and deletes.
+- **Levels:** a sorted `std::vector` of 24-byte entries per side, with the best price at the back.
+  Activity concentrates near the touch, so lookup is a short scan from the back, and insert/erase
+  near the touch moves few elements.
+- **Instruments:** one book per locate code in a flat 65,536-entry array, as the spec intends.
+
+**Rejected for `FastMarket`:**
+
+- **A price-indexed ladder array per instrument** (O(1) level access). It needs a price band per
+  instrument and recentring when the price moves outside it, and costs memory for thousands of
+  mostly-quiet instruments. Measured level lookups were not the bottleneck.
+- **Separate hash maps per instrument.** Order references are day-unique across instruments, so a
+  single index is enough, and every modify message carries the locate for validation anyway.
+
+**Verification:**
+
+- The behavioural tests are typed tests run against both markets.
+- Both are checked against a third, flat oracle that recomputes levels by sorting a list of orders.
+- A lockstep differential test compares the two markets under 80,000 random operations,
+  including invalid ones. It uses sequential and random 64-bit ids, and starts `FastMarket` at a
+  capacity of 16 so its index and pool grow repeatedly.
+- Replaying the synthetic stream through both produces the same pinned digest.
+
+### 5.4 Pipeline (`mde_pipeline`)
+
+- **Feed thread:** receives packets, runs the sequencer, and copies each in-order message into a
+  64-byte `MessageSlot` (receive timestamp, length, data). The largest ITCH message is 50 bytes.
+- **Book thread:** pops slots, decodes and applies them. It is the only thread that touches book
+  state while the pipeline runs. The join at the end of `run()` publishes that state to the caller.
+
+**`SpscQueue<T, N>` memory ordering.** Head and tail are positions that only increase, masked to
+index the ring.
+
+- The producer writes the slot, then stores `tail_` with `release`.
+- The consumer loads `tail_` with `acquire`, so it sees the slot contents.
+- The consumer copies the slot out, then stores `head_` with `release`.
+- The producer loads `head_` with `acquire` before it reuses the slot.
+
+Each side reads its own index `relaxed`, because only it writes it. Each side also keeps a cached
+copy of the other's index and refreshes it only when the ring looks full or empty. Producer-owned
+and consumer-owned fields sit on separate 128-byte lines (Apple Silicon reports 128-byte lines).
+
+**Backpressure.** When the ring is full, the feed thread spins and counts it in `full_waits`;
+nothing is dropped in-process. During a live run, the kernel socket buffer, sized to 8 MB on
+request, absorbs bursts. If it overflows, the kernel drops datagrams and the sequencer recovers
+them by re-request. Blocking the feed thread therefore converts in-process overload into network
+loss, which the protocol is designed to recover from.
+
+`MutexQueue` is the baseline: a bounded `std::deque` under a `std::mutex`, with the same
+non-blocking interface.
+
+### 5.5 Simulated exchange (`mde_sim`)
+
+ITCH is an outbound market-data feed and has no order-entry semantics. The simulator therefore
+uses its own message types and shares nothing with the ITCH side.
+
+**Pre-trade risk checks**, in order:
+
+1. instrument exists
+2. price > 0
+3. quantity > 0
+4. client order id not used before by this account
+5. quantity ≤ `max_order_quantity`
+6. `price * quantity ≤ max_order_notional`, evaluated as `price > max / quantity` so it cannot
+   overflow
+7. worst-case position: `net + open buys + new buy ≤ max_position`, and the mirror for sells
+
+**Matching.** Price-time priority, executed at the resting order's price, never trading through
+the limit price. Every fill produces execution reports for both sides with cumulative and leaves
+quantities. Positions and open quantities update as fills happen.
+
+**Determinism.** `OrderFlow` generates seeded requests. It learns which orders are live only
+from execution reports, as a client would.
+
+### 5.6 Determinism
+
+- No wall-clock reads in generation, replay or simulation.
+- Randomness comes from SplitMix64 (`mde::Rng`), not `<random>` distributions, whose output differs
+  between libstdc++ and libc++.
+- State digests are FNV-1a over values fed in a fixed byte order.
+- Tests pin the bytes of a synthetic file, the book digest after replaying it, and the simulator's
+  report digest. They pass identically on macOS (libc++) and Linux (libstdc++).
+
+## 6. Testing strategy
+
+| Kind | Where |
+|---|---|
+| Golden vectors, every ITCH type, field offsets from the spec | `tests/test_itch_golden.cpp` |
+| Malformed input: every length, type byte, enum value; seeded mutation | `tests/test_itch_malformed.cpp` |
+| Encode/decode round trip, all types | `tests/test_itch_codec.cpp` |
+| MoldUDP64 golden vectors, malformed packets, every truncation | `tests/test_moldudp64.cpp` |
+| Sequencer: every loss/duplicate/reorder/timeout path; 40-seed impairment property | `tests/test_sequencer.cpp` |
+| Book behaviour (both markets), flat-oracle property, lockstep differential | `tests/test_market.cpp` |
+| ITCH → book semantics (P/Q/C/B, unknown orders) | `tests/test_book_builder.cpp` |
+| Synthetic data consistency, determinism, cross-platform digests | `tests/test_synth.cpp` |
+| Lossy replay recovery, determinism, unrecoverable loss, real UDP loopback | `tests/test_replay.cpp` |
+| Queue semantics, two-thread ordering, pipeline equivalence (TSan) | `tests/test_pipeline.cpp` |
+| Matching, risk, reports, position conservation, determinism | `tests/test_sim.cpp` |
+| libFuzzer: ITCH stream; MoldUDP64 datagrams into the sequencer | `fuzz/` |
+
+I checked the tests themselves by deliberately breaking code:
+
+- Swapping two same-width fields in a message definition failed the golden test.
+- Weakening the SPSC release/acquire pair to relaxed made TSan report a race.
+- An off-by-one in hash-index deletion failed the differential test.
+
+## 7. Threads, ownership and synchronization summary
+
+| State | Owner | Shared how |
+|---|---|---|
+| socket, sequencer, reorder buffer | feed thread | not shared |
+| ring slots | producer until `tail_` release; consumer until `head_` release | SPSC ring |
+| markets, `BookBuilder` statistics | book thread | published to the caller by `join()` |
+| `PipelineStats` | feed thread | returned after `join()` |
+| publisher (`mde serve`) | its own thread or process | UDP only |
+
+## 8. Error handling
+
+- **Decode, packet and book anomalies:** counted, never thrown, and reported by the CLI.
+- **Socket set-up failures:** thrown as `std::system_error`.
+- **Socket errors:** `EINTR` is retried. `ENOBUFS` on send is treated as loss, which the protocol
+  recovers.
+- **CLI:** every command catches exceptions at the top level and exits non-zero. `mde book --check`
+  and `mde replay` also exit non-zero on invariant violations or an incomplete session.
+
+## 9. Limitations
+
+- **No real exchange data has been run through this code.** Nasdaq's sample files are licensed
+  data. Everything was tested against the specification and original synthetic data.
+- **Synthetic flow is not real flow.** The generator concentrates activity near the touch and
+  cancels more often than it fills, but its distributions are invented. Benchmark numbers describe
+  this workload only.
+- **No snapshot recovery (GLIMPSE).** After an unrecoverable gap, the books stay structurally
+  valid but are knowingly incomplete until the next session.
+- **Broken trades are counted but don't reverse volume.** Reversing them would need an index of
+  every execution's match number for the day.
+- **No kernel bypass, no `recvmmsg` batching, no hardware timestamps.** Receive timestamps come
+  from `steady_clock` after `recvfrom` returns.
+- **macOS has no hard CPU affinity**, so `--pin` there only sets a QoS class. Multicast through the
+  default interface didn't deliver locally on the development Mac; loopback multicast works.
+- **The simulator has no self-trade prevention, market orders, IOC or amend.**

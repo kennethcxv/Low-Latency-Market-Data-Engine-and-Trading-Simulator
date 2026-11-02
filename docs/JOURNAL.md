@@ -309,3 +309,132 @@ became `max_notional / quantity + 1`.
 
 **Results.** 112/112 tests pass on macOS (Debug) and on Linux in five configurations: GCC 14
 and clang 18 in Release and ASan+UBSan, plus clang 18 TSan.
+
+## 2026-11-02 — Milestone 8: measurement, profiling and the optimized book
+
+**Order of work, stated plainly.** I sketched the optimized book's layout (pool, open
+addressing, sorted level vectors) before profiling, from experience with node-based containers.
+I then stopped and measured first: the benchmark harness was built and run against the reference
+book only, and the reference book was profiled, before any `FastMarket` code was written. The
+profile confirmed the sketch rather than producing it.
+
+**Profile of the reference book.** `sample`, 8 s, `book/reference` benchmark in Release:
+
+- About 36% of samples are in the allocator (`_xzm_free_main`, `_xzm_xzone_malloc_tiny`,
+  `_free`, …). Each order costs one `unordered_map` node, one `std::list` node and sometimes a
+  `std::map` node, each allocated on add and freed on delete.
+- Most of the remainder is inside `erase`, `reduce` and `insert`, following pointers between
+  those nodes.
+
+**`FastMarket`:**
+
+- A pool of 32-byte orders, linked in each level's FIFO by 32-bit indices.
+- An open-addressing order index: linear probing, Fibonacci hashing, at most half full, with
+  backward-shift deletion.
+- Sorted 24-byte level vectors with the best price at the back.
+
+It is verified as described in DESIGN.md §5.3. I mutation-tested the trickiest piece: making the
+backward-shift condition `>` instead of `>=` failed the differential test with "index does not
+point at queued order 165".
+
+**Test-suite performance bug.** The first lockstep differential test took 250 s in Debug. Its
+target ids came from a list of every id ever used, so most deletes hit dead orders and the books
+grew without bound. Pruning dead ids every 512 steps brought it to 13 s. Doing the full
+depth/queue comparison every 8th step, while still comparing results, counts, best levels and
+invariants every step, brought it to 1.6 s.
+
+**Benchmark environment problem.** The development Mac was not idle. Other user processes
+(unrelated projects) kept 1-minute load averages between 17 and 25 on 16 hardware threads, and I
+couldn't stop them. One early comparison also overlapped with my own 250 s test run, which made
+its tail latencies meaningless; I discarded it. The harness now prints the load average, and
+`docs/BENCHMARKS.md` reports results as measured on a loaded machine.
+
+**Results (2M synthetic messages, Release, Apple clang 21, load average about 17–25):**
+
+- Reference book: 7.1 M ops/s, p50 128 ns, p99 470 ns.
+- `FastMarket`: 17.9 M ops/s, p50 51 ns, p99 120 ns. That is 2.5× the throughput and 3.9× lower
+  p99.
+- Queue handoff throughput: SPSC 113 M/s, mutex 46 M/s, naive SPSC 23 M/s. The naive ring keeps
+  both indices on one cache line and reloads the other side's index on every operation.
+- Paced handoff at 1M msg/s, p50: SPSC 84 ns, naive 125 ns, mutex 7.7 µs.
+
+**Finding: the second thread lowers throughput on this workload.** The unpaced two-thread
+pipeline managed 7.7 M msg/s, against 14.2 M msg/s for sequencing, decoding and the book on one
+thread. Removing the benchmark's per-message latency timestamps raised the pipeline to 8.9–10.3
+M msg/s; the single-thread run measured 11.3–11.6 M msg/s in the same window.
+
+So the timestamps explain part of the gap, and the rest is the cost of moving every 64-byte slot
+between cores. Sequencing is about 5% of the per-message work, so there is little to gain by
+running it in parallel with the book. What the second thread buys is isolation: the socket is
+drained and re-requests are sent while the book is busy.
+
+The obvious next step is handing off one batch per packet instead of one slot per message. I
+haven't implemented it.
+
+## 2026-11-02 — Milestone 9: stress and failure handling
+
+**New impairments** in the offline channel:
+
+- burst loss: each drop takes out *n* consecutive packets;
+- truncated datagrams;
+- random datagrams injected from a foreign session.
+
+**`UdpSocket::set_receive_buffer`** allows a deliberately tiny kernel buffer, so the receiver can
+be tested against real kernel drops rather than simulated ones.
+
+**Stress tests** (`tests/test_stress.cpp`). The stream is 60k messages in Debug and 600k in
+optimized builds. Every case must either recover to the direct-replay digest or, where loss is
+permanent, account for it exactly:
+
+- 25% loss, 10% duplication, 10% reordering.
+- 1% loss in 50-packet bursts. The test asserts more requests than holes, because the server
+  caps each answer.
+- 5% truncated and 5% foreign datagrams. They are counted as malformed or as session
+  mismatches, and recovered.
+- A reorder buffer of 4 packets and request count of 16 under 30% reordering. Buffer overflows
+  occur and are recovered.
+- A dead re-request server. `delivered + lost == total` holds exactly, the book shows anomalies,
+  and the book invariants still hold.
+- A heartbeat claiming a 10¹² sequence jump. Exactly 3 capped requests are sent, then the hole
+  is skipped, with no allocation proportional to the hole.
+- A two-slot SPSC ring with a deliberately slow book thread. The feed thread waits on a full
+  ring more than once per 10 messages, and the digest is still exact.
+- **Real kernel drops.** A 16 KB `SO_RCVBUF`, a receiver that sleeps 1 ms every 2,000 messages,
+  and an unthrottled publisher. The publisher drops nothing itself, so every hole is a kernel
+  drop. The test asserts that holes occurred, that none were lost, and that the digest matches.
+
+**Finding: the retry budget has to match the loss rate.** The 25% test first failed with 165
+messages lost. At 25% loss each retransmission is itself lost a quarter of the time, so five
+attempts leave about 0.25⁵ ≈ 0.1% of holes unrecovered. The sequencer behaved as specified and
+my expectation was wrong. The test now uses 20 attempts, and the default (5) is documented as
+sized for low loss rates.
+
+**Failure reporting.** `mde listen` and `mde replay` now exit non-zero if any messages were lost
+or the session never reached end of session.
+
+**Results.** 128/128 tests pass:
+
+- macOS: Debug, ASan+UBSan, TSan, Release.
+- Linux: GCC 14 and clang 18 in Release and ASan+UBSan, plus clang 18 TSan.
+
+**Milestone 8, continued: experiments after the first full run.**
+
+- **`FastMarket` profile.** No allocator symbols in the steady state. About 38% of samples in
+  `unlink`, then `insert`, `reduce` and `add`. Index growth shows up only a few times.
+- **QoS (`--pin` on macOS = `USER_INTERACTIVE`).** No demonstrated benefit. Comparing two full
+  runs:
+  - single-threaded throughput agreed within about 10%;
+  - mutex-queue throughput went from 46 to 19 M/s;
+  - cross-thread p99s moved by up to three orders of magnitude.
+
+  The machine load (17–25) swamps any QoS effect. I recorded both runs instead of picking the
+  better one.
+- **Up-front reservation.** The first single run at 4.2M reserved orders showed 9.0 M ops/s
+  against 19.8–22.3 at smaller sizes. I didn't trust one sample on a loaded machine, so I
+  repeated the sweep three times, interleaving the sizes. The repeats showed:
+  - the large reservation costs about 12% throughput (16.8–17.7 vs 18.8–21.7 M ops/s);
+  - it cuts the worst 64-operation batch from 33–40 µs to 1.7–3.4 µs, i.e. it removes the
+    roughly 2 ms growth stalls;
+  - the 9.0 figure was noise.
+
+  Recorded as a trade-off in BENCHMARKS.md.
