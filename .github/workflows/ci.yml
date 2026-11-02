@@ -35,6 +35,27 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure -j 4
 
+  tsan:
+    name: ThreadSanitizer / clang-18
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y ninja-build clang-18
+      # TSan's fixed shadow-memory layout can collide with the 32-bit mmap ASLR entropy that
+      # Ubuntu 24.04 runner kernels enable ("unexpected memory mapping"); 28 bits is compatible.
+      - name: Reduce mmap ASLR entropy for TSan
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMDE_SANITIZE=thread -DMDE_WERROR=ON
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -j 4
+
   fuzz:
     name: libFuzzer / clang-18
     runs-on: ubuntu-24.04
