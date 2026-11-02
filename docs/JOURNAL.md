@@ -174,3 +174,51 @@ took 33 s in a Debug build. It is intended for correctness runs, not benchmarks.
 
 **Results.** 76/76 tests pass on macOS (Debug, ASan+UBSan) and Linux (GCC 14 and clang 18,
 Release and Debug ASan+UBSan, all with `-Werror`).
+
+## 2026-11-02 — Milestone 5: MoldUDP64 sequencing and replay
+
+**Packet validation.** `parse()` walks every message block before it reports success. A packet
+with a truncated block, trailing bytes, a payload on a heartbeat, or a sequence+count that
+overflows 64 bits is rejected whole and treated like a lost packet.
+
+**Sequencer.** It is a pure state machine: datagrams and timestamps go in, in-order messages
+and re-requests come out. Packets after a hole are buffered (bounded at 4,096 by default).
+Requests cover only the hole up to the first buffered packet and are repeated after a timeout.
+Any progress resets the retry budget. A hole that cannot be filled is skipped and counted in
+`messages_lost`.
+
+**Design bug found by exercising the CLI.** The first version had two related flaws, both
+visible in `mde replay --drop 0.01 --no-retransmit` on a 200k-message fixture:
+
+1. `gaps_detected` counted periods during which a hole was open, so it reported 1 for about
+   48 lost packets. It now counts holes: each time the stream jumps past the highest sequence
+   seen.
+2. With re-requests disabled, a hole's timeout only started once it reached the head of the
+   line. Consecutive holes were therefore skipped one timeout after another. At 100k packets
+   per second with a 20 ms timeout, the 4,096-packet reorder buffer overflowed: 39 overflows
+   and 3,670 messages lost from roughly 1,900 actually dropped.
+
+The fix measures each hole's timeout from the moment it was revealed, i.e. the arrival of the
+packet after it. That made `on_packet` take a receive timestamp. `on_timer` now skips every
+expired hole in one call. After the fix, the same run lost 2,101 messages, about the number
+dropped, with 0 overflows and 51 holes. A unit test pins the behaviour of holes ageing in
+parallel.
+
+**Results, all on the 200k-message synthetic fixture:**
+
+- `mde replay`, 2% drop, 1% duplicate, 2% reorder: 173 holes, 111 requests, 0 lost. The final
+  book digest equals direct replay (`55edd1085deb3610`).
+- `mde serve` + `mde listen` over real loopback UDP with 2% deliberate drops: 82 dropped, 82
+  re-requested and answered, 0 lost, same digest.
+- Multicast `239.255.0.1` over `lo0` (`--interface 127.0.0.1` on both ends): 45 dropped, 45
+  recovered, same digest. Multicast via the default interface (`en0`, Wi-Fi) delivered nothing
+  on this Mac. That is consistent with macOS's Local Network privacy restrictions, but I did
+  not confirm the cause. Local multicast tests on macOS therefore use the loopback interface.
+- Without retransmission, at 1% drop, the book stays structurally valid: invariants held after
+  all 189,891 book events, with 1,036 unknown-order anomalies from the lost adds.
+- libFuzzer, 60 s each: MoldUDP64 target 13.5M executions and ITCH target 16.7M, no crashes
+  and no ordering violations.
+
+**Tests.** 97/97 pass on macOS (Debug, ASan+UBSan) and Linux (GCC 14 and clang 18, Release and
+ASan+UBSan). This includes a 40-seed property test of exactly-once, in-order delivery at 5–10%
+loss with duplication and reordering, and a real-socket loopback test.

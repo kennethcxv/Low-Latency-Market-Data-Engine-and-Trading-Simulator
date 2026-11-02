@@ -16,12 +16,14 @@ Last updated: 2026-11-02
 - Reference order book (map/list/hash), ITCH book builder with separate volume statistics,
   invariant checker, synthetic generator with cross-platform byte-identical output, `mde gen`,
   `mde book --check`.
+- MoldUDP64: whole-packet validation, sequencer (gap/dup/reorder/heartbeat/end-of-session,
+  bounded reorder buffer, re-request with retry and skip), offline lossy replay, UDP unicast and
+  multicast publisher/receiver, `mde replay|serve|listen`, fuzz target.
 
 ## Remaining (acceptance criteria)
 
 | # | Milestone | Done when |
 |---|---|---|
-| 5 | Sequencing and replay | MoldUDP64 parser with golden vectors; sequencer handles gap/dup/reorder/heartbeat/end-of-session; lossy replay recovers to the same book digest as lossless; UDP loopback test with re-requests |
 | 6 | Multithreaded pipeline | SPSC ring and mutex baseline; threaded replay digest equals single-threaded; TSan job in CI |
 | 7 | Simulated trading | matching engine (price-time), cancels, execution reports, positions, max qty/notional/position checks; deterministic digest test |
 | 8 | Performance | optimized book matches reference under differential tests; benchmarks for decode, book, queue, replay, e2e, order entry with p50/p95/p99/max |
@@ -30,13 +32,14 @@ Last updated: 2026-11-02
 
 ## Latest test results
 
-76/76 pass on macOS (Apple clang 21: Debug, ASan+UBSan) and Linux in Docker (GCC 14, clang 18:
-Release and Debug ASan+UBSan, `-Werror`).
+97/97 pass on macOS (Apple clang 21: Debug, ASan+UBSan) and Linux in Docker (GCC 14, clang 18:
+Release and Debug ASan+UBSan, `-Werror`). Fuzzers: 60 s each, no findings.
 
 ## Known issues
 
-None open.
+- Multicast through the default interface on macOS delivered nothing locally; loopback
+  (`--interface 127.0.0.1`) works. Not investigated further.
 
 ## Next step
 
-Milestone 5: MoldUDP64 packets, sequencer, lossy replay harness, UDP transport.
+Milestone 6: SPSC ring buffer, two-thread pipeline, TSan in CI.
