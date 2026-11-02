@@ -1,6 +1,8 @@
 add_executable(mde_tests
   test_common.cpp
-  test_itch_codec.cpp)
+  test_itch_codec.cpp
+  test_itch_golden.cpp
+  test_itch_malformed.cpp)
 target_link_libraries(mde_tests PRIVATE mde_itch mde_warnings GTest::gtest_main)
 
 include(GoogleTest)

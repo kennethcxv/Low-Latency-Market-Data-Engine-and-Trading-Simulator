@@ -59,4 +59,19 @@ using AllMessages =
                itch::OrderReplace, itch::Trade, itch::CrossTrade, itch::BrokenTrade, itch::Noii,
                itch::RetailPriceImprovement, itch::DlcrPriceDiscovery>;
 
+template <class F>
+void for_each_message_type(F&& f) {
+  std::apply([&](auto... m) { (f(m), ...); }, AllMessages{});
+}
+
+// Random message that passes field validation (valid side / printable values).
+template <class T>
+T random_valid(Rng& rng) {
+  T m{};
+  fill_random(m, rng);
+  if constexpr (requires { m.side; }) m.side = rng.below(2) ? 'B' : 'S';
+  if constexpr (requires { m.printable; }) m.printable = rng.below(2) ? 'Y' : 'N';
+  return m;
+}
+
 }  // namespace mde::test
