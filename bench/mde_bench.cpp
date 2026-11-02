@@ -21,6 +21,7 @@
 #include <chrono>
 #include <cinttypes>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <memory>
@@ -497,6 +498,9 @@ void print_markdown(const Options& o, const Workload& w, const ClockInfo& clock)
   std::printf("| OS | %s %s %s |\n", u.sysname, u.release, u.machine);
   std::printf("| Compiler | %s |\n", __VERSION__);
   std::printf("| Flags | `%s` |\n", MDE_BENCH_FLAGS);
+  double load[3] = {0, 0, 0};
+  getloadavg(load, 3);
+  std::printf("| Load average at start | %.2f %.2f %.2f (1/5/15 min; nonzero means other work was running) |\n", load[0], load[1], load[2]);
   std::printf("| Clock | steady_clock: resolution %.1f ns, cost per read %.1f ns (measured) |\n", clock.resolution_ns, clock.overhead_ns);
   std::printf("| Thread placement | %s |\n", o.pin ? "--pin: Linux CPU affinity (feed cpu 2, book cpu 4); macOS QoS USER_INTERACTIVE" : "OS default");
   std::printf("| Workload | synthetic ITCH, %zu messages, %zu symbols, seed %" PRIu64 ", %.1f MB |\n", w.messages.size(),
@@ -508,6 +512,10 @@ void print_markdown(const Options& o, const Workload& w, const ClockInfo& clock)
   std::printf("| Benchmark | Items | Throughput (M/s) | p50 (ns) | p95 (ns) | p99 (ns) | max (ns) | Measures |\n");
   std::printf("|---|---:|---:|---:|---:|---:|---:|---|\n");
   for (const auto& r : g_results) {
+    if (r.max == 0) {  // throughput-only benchmark: no per-item samples
+      std::printf("| %s | %" PRIu64 " | %.2f | - | - | - | - | %s |\n", r.name.c_str(), r.items, r.throughput / 1e6, r.note.c_str());
+      continue;
+    }
     std::printf("| %s | %" PRIu64 " | %.2f | %.1f | %.1f | %.1f | %.0f | %s |\n", r.name.c_str(), r.items, r.throughput / 1e6,
                 r.p50, r.p95, r.p99, r.max, r.note.c_str());
   }
