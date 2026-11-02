@@ -21,20 +21,21 @@ Last updated: 2026-11-02
   multicast publisher/receiver, `mde replay|serve|listen`, fuzz target.
 - Two-thread pipeline (feed thread -> SPSC ring or mutex queue -> book thread), `--pipeline`
   option, TSan job in CI.
+- Simulated exchange: pre-trade risk (qty, notional, worst-case position, duplicate ids),
+  price-time matching, execution reports, positions, deterministic simulator, `mde sim`.
 
 ## Remaining (acceptance criteria)
 
 | # | Milestone | Done when |
 |---|---|---|
-| 7 | Simulated trading | matching engine (price-time), cancels, execution reports, positions, max qty/notional/position checks; deterministic digest test |
 | 8 | Performance | optimized book matches reference under differential tests; benchmarks for decode, book, queue, replay, e2e, order entry with p50/p95/p99/max |
 | 9 | Stress and failure | high/burst loss, reorder beyond buffer, re-request server down, malformed packets mixed in, sustained backpressure |
 | 10 | Docs and release | README, design, benchmark report; fresh-clone build verified; CI green |
 
 ## Latest test results
 
-105/105 pass on macOS (Apple clang 21: Debug, ASan+UBSan, TSan) and Linux in Docker (GCC 14, clang
-18: Release, Debug ASan+UBSan, TSan; `-Werror`). Fuzzers: 60 s each, no findings.
+112/112 pass on macOS (Apple clang 21: Debug) and Linux in Docker (GCC 14, clang 18: Release and
+Debug ASan+UBSan; clang 18 TSan; `-Werror`).
 
 ## Known issues
 
@@ -43,4 +44,6 @@ Last updated: 2026-11-02
 
 ## Next step
 
-Milestone 7: simulated order entry, pre-trade risk and matching engine.
+Milestone 8: benchmark harness, profile the reference book, then build and measure an optimized
+market. The optimized book's data layout (`include/mde/book/fast_market.hpp`, uncommitted) was
+sketched before profiling.

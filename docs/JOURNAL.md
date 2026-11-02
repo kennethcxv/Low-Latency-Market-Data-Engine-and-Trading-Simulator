@@ -263,3 +263,49 @@ whole, which CI runs, does catch this one.
 **CI.** Added a TSan job with `vm.mmap_rnd_bits=28`. GitHub's Ubuntu 24.04 runners use 32-bit
 mmap randomisation, which is known to break TSan's shadow mapping. The Docker kernel here uses
 18 bits, so I could not reproduce that issue locally.
+
+## 2026-11-02 — Milestone 7: simulated order entry, risk and matching
+
+`mde_sim` depends only on `mde_common`. It shares no types with the ITCH side: ITCH is an
+outbound market-data feed, and nothing here pretends otherwise.
+
+**Request flow.** `Exchange::submit` runs the pre-trade checks in this order:
+
+1. instrument exists
+2. price > 0
+3. quantity > 0
+4. client order id not used before by that account
+5. quantity ≤ max order quantity
+6. notional ≤ max notional, computed as `price > max / quantity` so the product cannot overflow
+7. worst-case position: `net + open buys + new buy ≤ limit` (and the mirror for sells)
+
+Accepted orders match in price-time priority at the resting order's price and never trade
+through the limit. Every request produces execution reports for both sides of each fill, with
+cumulative and leaves quantities, from one exchange-wide counter. Cancels release open
+quantity; cancelling a non-live client id yields `CancelRejected`.
+
+**Policy choices:**
+
+- Self-trades are allowed. Real venues usually offer self-trade prevention; it isn't implemented.
+- Only GTC limit orders are supported: no market, IOC or amend.
+- Positions are per account and instrument, with no cross-instrument netting.
+
+**Tests.**
+
+- Unit tests cover priority and trade-through, report contents for both sides, and every reject
+  reason. A notional of `INT64_MAX * 2` is rejected without overflowing, and an order exactly
+  at the notional limit is accepted.
+- The simulator property test (50,000 steps, position limit 2,000) checks four things:
+  - net positions sum to zero for every instrument;
+  - each account's open buy/sell matches the leaves quantities rebuilt independently from the
+    reports;
+  - the worst-case position bound holds for every account;
+  - every reject reason was produced at least once.
+- The report digest is pinned and reproduced on macOS (libc++) and Linux (libstdc++).
+
+**Bug caught before running.** Simulator requests meant to exceed the notional limit used
+`price = max_notional`. With quantity 1 that is exactly at the limit and is accepted. The value
+became `max_notional / quantity + 1`.
+
+**Results.** 112/112 tests pass on macOS (Debug) and on Linux in five configurations: GCC 14
+and clang 18 in Release and ASan+UBSan, plus clang 18 TSan.
