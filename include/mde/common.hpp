@@ -112,6 +112,9 @@ class Rng {
   // True with probability `percent`/100.
   bool percent(unsigned percent) noexcept { return below(100) < percent; }
 
+  // True with probability p. Uses the top 53 bits, which convert to double exactly everywhere.
+  bool chance(double p) noexcept { return static_cast<double>(next() >> 11) * 0x1.0p-53 < p; }
+
  private:
   std::uint64_t s_;
 };

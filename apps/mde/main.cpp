@@ -1,11 +1,16 @@
 // mde: command-line front end. Each subcommand is a thin layer over the libraries.
+#include <arpa/inet.h>
+
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <array>
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -17,6 +22,8 @@
 #include "mde/common.hpp"
 #include "mde/itch/codec.hpp"
 #include "mde/itch/format.hpp"
+#include "mde/moldudp64/replay.hpp"
+#include "mde/net/session.hpp"
 #include "mde/synth/generator.hpp"
 
 namespace {
@@ -177,6 +184,33 @@ void print_book_report(const Builder& builder, std::size_t top) {
   }
 }
 
+template <class Builder>
+int finish_report(const Builder& builder, bool check, std::size_t top) {
+  const auto& market = builder.market();
+  print_book_report(builder, top);
+  const auto& c = builder.counters();
+  std::printf("\nmessages %" PRIu64 ", resting orders %zu, broken trades %" PRIu64 "\n", c.messages,
+              market.order_count(), c.broken_trades);
+  for (std::size_t s = 1; s < c.decode.size(); ++s) {
+    if (c.decode[s]) std::printf("decode rejected (%s): %" PRIu64 "\n", mde::itch::to_string(static_cast<mde::itch::DecodeStatus>(s)).data(), c.decode[s]);
+  }
+  for (std::size_t r = 1; r < c.book.size(); ++r) {
+    if (c.book[r]) std::printf("book anomaly (%s): %" PRIu64 "\n", mde::book::to_string(static_cast<mde::book::Result>(r)).data(), c.book[r]);
+  }
+  std::printf("state digest %016" PRIx64 "\n", mde::book::state_digest(market));
+  if (!check) return 0;
+  const std::string final_check = market.check_all_invariants();
+  if (c.invariant_violations || !final_check.empty()) {
+    std::printf("INVARIANT VIOLATIONS: %" PRIu64 "; first: %s %s\n", c.invariant_violations,
+                builder.first_violation().c_str(), final_check.c_str());
+    return 1;
+  }
+  std::uint64_t events = 0;
+  for (auto n : c.book) events += n;
+  std::printf("invariants held after every book event (%" PRIu64 " checks)\n", events);
+  return 0;
+}
+
 int cmd_book(const std::vector<std::string_view>& raw) {
   const Args args(raw, {"--check"});
   if (args.positional().size() != 1) {
@@ -193,34 +227,107 @@ int cmd_book(const std::vector<std::string_view>& raw) {
   mde::FramedReader::Status framing;
   while ((framing = reader.next(msg)) == mde::FramedReader::Status::kOk) builder.apply(msg);
 
-  print_book_report(builder, args.number("--top", 10));
-
-  const auto& c = builder.counters();
-  std::printf("\nmessages %" PRIu64 ", resting orders %zu, broken trades %" PRIu64 "\n", c.messages,
-              market.order_count(), c.broken_trades);
-  for (std::size_t s = 1; s < c.decode.size(); ++s) {
-    if (c.decode[s]) std::printf("decode rejected (%s): %" PRIu64 "\n", mde::itch::to_string(static_cast<mde::itch::DecodeStatus>(s)).data(), c.decode[s]);
-  }
-  for (std::size_t r = 1; r < c.book.size(); ++r) {
-    if (c.book[r]) std::printf("book anomaly (%s): %" PRIu64 "\n", mde::book::to_string(static_cast<mde::book::Result>(r)).data(), c.book[r]);
-  }
-  std::printf("state digest %016" PRIx64 "\n", mde::book::state_digest(market));
-
-  int rc = framing == mde::FramedReader::Status::kTruncated ? 1 : 0;
-  if (framing == mde::FramedReader::Status::kTruncated) std::printf("truncated record at byte offset %zu\n", reader.offset());
-  if (check) {
-    std::string final_check = market.check_all_invariants();
-    if (c.invariant_violations || !final_check.empty()) {
-      std::printf("INVARIANT VIOLATIONS: %" PRIu64 "; first: %s %s\n", c.invariant_violations,
-                  builder.first_violation().c_str(), final_check.c_str());
-      rc = 1;
-    } else {
-      std::uint64_t events = 0;
-      for (auto n : c.book) events += n;
-      std::printf("invariants held after every book event (%" PRIu64 " checks)\n", events);
-    }
+  int rc = finish_report(builder, check, args.number("--top", 10));
+  if (framing == mde::FramedReader::Status::kTruncated) {
+    std::printf("truncated record at byte offset %zu\n", reader.offset());
+    rc = 1;
   }
   return rc;
+}
+
+void print_sequencer_stats(const mde::moldudp64::SequencerStats& s) {
+  std::printf("moldudp64: packets %" PRIu64 ", delivered %" PRIu64 ", duplicates %" PRIu64 ", out-of-order %" PRIu64
+              ", gaps %" PRIu64 ", requests %" PRIu64 ", lost %" PRIu64 ", malformed %" PRIu64 ", session mismatches %" PRIu64
+              ", buffer overflows %" PRIu64 "\n",
+              s.packets, s.delivered, s.duplicates, s.out_of_order_packets, s.gaps_detected, s.requests_sent,
+              s.messages_lost, s.malformed_packets, s.session_mismatches, s.buffer_overflows);
+}
+
+int cmd_replay(const std::vector<std::string_view>& raw) {
+  const Args args(raw, {"--no-retransmit", "--check"});
+  if (args.positional().size() != 1) {
+    std::fprintf(stderr, "usage: mde replay FILE [--drop P] [--dup P] [--reorder P] [--seed N] [--no-retransmit]\n"
+                         "                        [--packet-size BYTES] [--check] [--top N]\n");
+    return 2;
+  }
+  const std::vector<std::uint8_t> file = read_file(args.positional()[0]);
+  const mde::moldudp64::MessageLog log(mde::moldudp64::make_session(args.text("--session", "REPLAY")), file);
+  mde::moldudp64::ReplayOptions options;
+  options.impairments = {std::stod(args.text("--drop", "0")), std::stod(args.text("--dup", "0")),
+                         std::stod(args.text("--reorder", "0")), args.number("--seed", 1)};
+  options.retransmit = !args.has("--no-retransmit");
+  options.max_packet_size = args.number("--packet-size", 1400);
+
+  const bool check = args.has("--check");
+  mde::book::ReferenceMarket market;
+  mde::book::BookBuilder builder(market, check);
+  const auto result = mde::moldudp64::replay(log, options, [&](std::uint64_t, mde::Bytes msg) { builder.apply(msg); });
+  std::printf("published %" PRIu64 " packets, %" PRIu64 " retransmissions, session %s\n", result.packets_sent,
+              result.retransmissions, result.complete ? "complete" : "INCOMPLETE");
+  print_sequencer_stats(result.stats);
+  std::printf("\n");
+  int rc = finish_report(builder, check, args.number("--top", 10));
+  return result.complete ? rc : 1;
+}
+
+int cmd_serve(const std::vector<std::string_view>& raw) {
+  const Args args(raw, {});
+  const auto dest = mde::net::parse_endpoint(args.text("--dest", ""));
+  if (args.positional().size() != 1 || !dest) {
+    std::fprintf(stderr, "usage: mde serve FILE --dest IP:PORT [--bind IP:PORT] [--rate PACKETS_PER_SEC] [--drop P]\n"
+                         "                       [--session NAME] [--linger-ms N] [--ttl N] [--interface IP]\n"
+                         "       --dest may be a multicast group; re-requests are answered on the --bind port\n");
+    return 2;
+  }
+  const std::vector<std::uint8_t> file = read_file(args.positional()[0]);
+  const mde::moldudp64::MessageLog log(mde::moldudp64::make_session(args.text("--session", "LIVE")), file);
+  const std::string bind_text = args.text("--bind", "0.0.0.0:0");
+  const auto bind = mde::net::parse_endpoint(bind_text);
+  if (!bind) throw std::invalid_argument("bad --bind");
+  mde::net::UdpSocket socket(bind_text.substr(0, bind_text.rfind(':')), ntohs(bind->address.sin_port));
+  const bool multicast = (ntohl(dest->address.sin_addr.s_addr) >> 28) == 0xE;  // 224.0.0.0/4
+  if (multicast) socket.set_multicast(static_cast<int>(args.number("--ttl", 1)), /*loopback=*/true, args.text("--interface", "0.0.0.0"));
+
+  mde::net::PublishOptions options;
+  options.destination = *dest;
+  options.packets_per_second = args.number("--rate", 100'000);
+  options.drop = std::stod(args.text("--drop", "0"));
+  options.linger = std::chrono::milliseconds(args.number("--linger-ms", 3000));
+  std::printf("publishing %" PRIu64 " messages to %s; re-request server on port %u\n", log.size(),
+              dest->to_string().c_str(), socket.local_port());
+  std::fflush(stdout);
+  const std::atomic<bool> stop{false};
+  const auto s = mde::net::publish(socket, log, options, stop);
+  std::printf("sent %" PRIu64 " packets, deliberately dropped %" PRIu64 ", answered %" PRIu64 " of %" PRIu64 " re-requests\n",
+              s.packets_sent, s.packets_dropped, s.retransmissions, s.requests);
+  return 0;
+}
+
+int cmd_listen(const std::vector<std::string_view>& raw) {
+  const Args args(raw, {"--check"});
+  if (!args.has("--port")) {
+    std::fprintf(stderr, "usage: mde listen --port N [--bind IP] [--group IP] [--interface IP]\n"
+                         "                  [--rerequest IP:PORT] [--idle-ms N] [--check] [--top N]\n");
+    return 2;
+  }
+  std::optional<mde::net::Endpoint> rerequest;
+  if (args.has("--rerequest")) {
+    rerequest = mde::net::parse_endpoint(args.text("--rerequest", ""));
+    if (!rerequest) throw std::invalid_argument("bad --rerequest");
+  }
+  mde::net::UdpSocket socket(args.text("--bind", "0.0.0.0"), static_cast<std::uint16_t>(args.number("--port", 0)),
+                             args.text("--group", ""), args.text("--interface", "0.0.0.0"));
+  std::printf("listening on port %u (receive buffer %d bytes)\n", socket.local_port(), socket.receive_buffer_bytes());
+  std::fflush(stdout);
+
+  const bool check = args.has("--check");
+  mde::book::ReferenceMarket market;
+  mde::book::BookBuilder builder(market, check);
+  const auto stats = mde::net::receive_session(socket, rerequest, {}, std::chrono::milliseconds(args.number("--idle-ms", 5000)),
+                                               [&](std::uint64_t, mde::Bytes msg) { builder.apply(msg); });
+  print_sequencer_stats(stats);
+  std::printf("\n");
+  return finish_report(builder, check, args.number("--top", 10));
 }
 
 struct Command {
@@ -233,6 +340,9 @@ constexpr std::array kCommands = {
     Command{"decode", cmd_decode, "decode a length-prefixed ITCH 5.0 file and count messages"},
     Command{"gen", cmd_gen, "generate a synthetic ITCH 5.0 file"},
     Command{"book", cmd_book, "rebuild order books from an ITCH 5.0 file and report top of book"},
+    Command{"replay", cmd_replay, "replay a file through MoldUDP64 with simulated loss and recovery"},
+    Command{"serve", cmd_serve, "publish a file as MoldUDP64 over UDP and answer re-requests"},
+    Command{"listen", cmd_listen, "receive a MoldUDP64 session over UDP and rebuild the books"},
 };
 
 void usage() {
