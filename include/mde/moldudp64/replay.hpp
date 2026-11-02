@@ -42,7 +42,7 @@ struct Impairments {
   std::uint64_t seed = 1;
   std::size_t burst = 1;  // each drop loses this many consecutive packets
   double corrupt = 0;     // probability a packet arrives truncated at a random byte
-  double garbage = 0;     // probability a random datagram from another session is injected
+  double garbage = 0;     // probability a random datagram is injected (almost always malformed)
 };
 
 // Applies seeded drop/duplicate/reorder/corruption to a packet sequence, in order.
@@ -64,7 +64,8 @@ struct ReplayResult {
 };
 
 // Publishes the whole log through the impaired channel, answers re-requests from the log, and
-// finishes with end-of-session packets until the sequencer is complete. Simulated time advances
+// finishes with end-of-session packets until the sequencer is complete. Retransmissions are
+// subject to `drop` only (not duplication, reordering or corruption). Simulated time advances
 // 10 us per packet, so the result is a pure function of the inputs.
 template <class Deliver>
 ReplayResult replay(const MessageLog& log, ReplayOptions options, Deliver&& deliver) {

@@ -43,6 +43,7 @@ struct OrderView {
 
 // Outcome of applying one book operation. Anything but kOk means the input contradicted the
 // book's state; the operation is then either ignored or (kOverfill) clamped, never half-applied.
+// (This is about input validation. An allocation failure mid-operation is not recovered from.)
 enum class Result : std::uint8_t {
   kOk,
   kDuplicateOrder,  // add/replace with an id that is already live

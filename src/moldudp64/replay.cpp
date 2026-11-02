@@ -1,5 +1,6 @@
 #include "mde/moldudp64/replay.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 namespace mde::moldudp64 {
@@ -54,7 +55,7 @@ std::vector<std::vector<std::uint8_t>> impair(const std::vector<std::vector<std:
   std::size_t burst_left = 0;
   for (std::size_t i = 0; i < packets.size(); ++i) {
     if (burst_left > 0 || rng.chance(impairments.drop)) {
-      burst_left = burst_left > 0 ? burst_left - 1 : impairments.burst - 1;
+      burst_left = burst_left > 0 ? burst_left - 1 : std::max<std::size_t>(impairments.burst, 1) - 1;
       continue;
     }
     if (rng.chance(impairments.garbage)) {
@@ -67,7 +68,7 @@ std::vector<std::vector<std::uint8_t>> impair(const std::vector<std::vector<std:
       continue;
     }
     out.push_back(packets[i]);
-    if (rng.chance(impairments.corrupt)) out.back().resize(rng.below(out.back().size()));
+    if (rng.chance(impairments.corrupt) && !out.back().empty()) out.back().resize(rng.below(out.back().size()));
     if (rng.chance(impairments.duplicate)) out.push_back(packets[i]);
     for (std::size_t h = 0; h < held.size();) {
       if (held[h].first <= out.size()) {

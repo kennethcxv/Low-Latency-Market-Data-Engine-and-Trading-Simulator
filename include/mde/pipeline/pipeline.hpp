@@ -6,9 +6,10 @@
 // writes visible to the caller. The queue is the only shared structure.
 //
 // Backpressure: when the queue is full the feed thread spins until the book thread frees a slot,
-// and counts the episode in full_waits. Nothing is dropped inside the process. Upstream of the
-// feed thread, a live receiver's kernel socket buffer absorbs bursts; if it overflows the kernel
-// drops datagrams, the sequencer sees gaps, and re-requests recover them.
+// and counts the episode in full_waits. Nothing is dropped inside the process except messages too
+// long to be ITCH, which are counted in `oversized`. Upstream of the feed thread, a live
+// receiver's kernel socket buffer absorbs bursts; if it overflows the kernel drops datagrams, the
+// sequencer sees gaps, and re-requests recover them.
 #pragma once
 
 #include <atomic>
@@ -67,7 +68,7 @@ PipelineStats run(Queue& queue, Produce&& produce, Consume&& consume) {
     MessageSlot slot;
     slot.ingress_ns = ingress_ns;
     slot.length = static_cast<std::uint8_t>(message.size());
-    std::memcpy(slot.data, message.data(), message.size());
+    if (!message.empty()) std::memcpy(slot.data, message.data(), message.size());
     if (!queue.try_push(slot)) {
       ++stats.full_waits;
       do cpu_relax();

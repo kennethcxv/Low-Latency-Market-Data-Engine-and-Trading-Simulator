@@ -96,7 +96,7 @@ Qty OrderBook::quantity_at(Side side, Price price) const {
 
 Exchange::Exchange(std::size_t instruments, RiskLimits limits) : limits_(limits), books_(instruments) {
   if (limits.max_order_quantity <= 0 || limits.max_order_notional <= 0 || limits.max_position < 0) {
-    throw std::invalid_argument("risk limits must be positive");
+    throw std::invalid_argument("max order quantity and notional must be positive, max position non-negative");
   }
 }
 

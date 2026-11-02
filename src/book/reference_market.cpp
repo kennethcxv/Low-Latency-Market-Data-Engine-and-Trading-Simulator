@@ -88,15 +88,13 @@ std::optional<Level> ReferenceMarket::best(Locate locate, Side side) const {
 std::vector<Level> ReferenceMarket::depth(Locate locate, Side side, std::size_t max_levels) const {
   std::vector<Level> out;
   auto emit = [&](const auto& entry) {
-    out.push_back({entry.first, entry.second.quantity,
-                   static_cast<std::uint32_t>(entry.second.queue.size())});
-    return out.size() < max_levels;
+    out.push_back({entry.first, entry.second.quantity, static_cast<std::uint32_t>(entry.second.queue.size())});
   };
   const Levels& l = levels(locate, side);
   if (side == Side::kBuy) {
-    for (auto it = l.rbegin(); it != l.rend() && emit(*it); ++it) {}
+    for (auto it = l.rbegin(); it != l.rend() && out.size() < max_levels; ++it) emit(*it);
   } else {
-    for (auto it = l.begin(); it != l.end() && emit(*it); ++it) {}
+    for (auto it = l.begin(); it != l.end() && out.size() < max_levels; ++it) emit(*it);
   }
   return out;
 }

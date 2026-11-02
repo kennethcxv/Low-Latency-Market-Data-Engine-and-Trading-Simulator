@@ -36,6 +36,7 @@ TYPED_TEST(MarketTest, AggregatesLevelsBestFirst) {
   EXPECT_EQ(m.best(kLoc, Side::kSell), (Level{102'0000, 20, 1}));
   EXPECT_EQ(m.depth(kLoc, Side::kBuy, 10), (std::vector<Level>{{101'0000, 250, 2}, {100'0000, 100, 1}}));
   EXPECT_EQ(m.depth(kLoc, Side::kSell, 1), (std::vector<Level>{{102'0000, 20, 1}}));
+  EXPECT_TRUE(m.depth(kLoc, Side::kBuy, 0).empty());
   EXPECT_FALSE(m.best(kLoc + 1, Side::kBuy));
   EXPECT_EQ(m.order_count(), 5u);
   EXPECT_EQ(m.check_all_invariants(), "");
