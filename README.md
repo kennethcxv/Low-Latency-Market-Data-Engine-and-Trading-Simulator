@@ -100,8 +100,11 @@ B=./build/release/apps/mde
 $B gen --out data/day.itch --messages 2000000 --symbols 64 --seed 1
 $B decode data/day.itch --print 5
 
-# Rebuild every book; --check validates the touched book after every event
-$B book data/day.itch --check --top 5
+# Rebuild every book and print the top of book; prints a state digest
+$B book data/day.itch --top 5
+# --check also validates the touched book after every event. It is O(book size) per event and is
+# meant for correctness runs: about 8.5 minutes for these 2M messages, so try it on a smaller file.
+$B gen --out data/small.itch --messages 200000 --symbols 16 && $B book data/small.itch --check
 
 # Replay through MoldUDP64 with 2% loss, 1% duplication and 2% reordering. The final state
 # digest matches `mde book` exactly; with --no-retransmit the loss is reported instead.
@@ -122,7 +125,7 @@ recovery, one or two threads, UDP) yields the same digest, and the tests assert 
 
 ## Testing
 
-There are 128 tests (`ctest`). They include:
+There are 131 tests (`ctest`). They include:
 
 - **Protocol golden vectors.** Every ITCH type and the MoldUDP64 header and request packets, laid
   out byte by byte from the spec's offset tables.
@@ -143,7 +146,7 @@ There are 128 tests (`ctest`). They include:
   - truncated and foreign datagrams;
   - a reorder buffer of 4 packets;
   - a dead re-request server;
-  - a 10¹² sequence jump;
+  - a forged 10¹² sequence jump (rejected) and a plausible 10⁹ one (handled with bounded work);
   - a two-slot ring under sustained backpressure;
   - **real kernel drops** on a 16 KB socket buffer, recovered by re-request.
 - **Concurrency.** Ring and pipeline tests run under TSan in CI.

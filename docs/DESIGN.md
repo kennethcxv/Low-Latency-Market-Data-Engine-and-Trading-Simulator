@@ -169,6 +169,20 @@ delivered; retransmissions may be split differently from the originals.
   packet after it arrived. The first version started that timeout when the hole reached the head of
   the line. Holes then expired one after another and overflowed the buffer; the journal entry for
   milestone 5 has the numbers.
+- **The whole hole is skipped, not just the range last requested.** That gets back to live data
+  quickly when the re-request server is down. The alternative, skipping 1,024 messages per retry
+  cycle, would take about 10 s to drain a 100k-message hole while the book sat stale. The cost: if
+  the server comes back quickly, data it could have supplied is counted as lost.
+- **No grace period for reordering.** The first request for a new hole goes out on the next timer
+  tick, so ordinary reordering causes some redundant retransmissions.
+- **Implausible sequences are rejected.** MoldUDP64 has no checksum. A packet claiming a sequence
+  more than `max_sequence_jump` (2³², more than a day's messages) past anything seen is counted in
+  `implausible_sequences` and dropped. Accepting it would open a hole that, once skipped, makes every
+  real packet look like a duplicate. Corruption of low-order sequence bits is not detectable here;
+  the UDP checksum is the defence for that.
+- **The reorder buffer is bounded twice:** by packet count (4,096) and by bytes (64 MB).
+- **Time must be non-decreasing.** Elapsed time saturates at zero if a caller's clock goes
+  backwards.
 
 **Rejected:** the spec's sample receiver ignores every packet after a gap until the re-request is
 answered. Under load that turns one lost packet into a re-request for everything sent in the
@@ -289,7 +303,7 @@ from execution reports, as a client would.
 | Malformed input: every length, type byte, enum value; seeded mutation | `tests/test_itch_malformed.cpp` |
 | Encode/decode round trip, all types | `tests/test_itch_codec.cpp` |
 | MoldUDP64 golden vectors, malformed packets, every truncation | `tests/test_moldudp64.cpp` |
-| Sequencer: every loss/duplicate/reorder/timeout path; 40-seed impairment property | `tests/test_sequencer.cpp` |
+| Sequencer: every loss/duplicate/reorder/timeout path, implausible jumps, byte cap; 40-seed impairment property | `tests/test_sequencer.cpp` |
 | Book behaviour (both markets), flat-oracle property, lockstep differential | `tests/test_market.cpp` |
 | ITCH → book semantics (P/Q/C/B, unknown orders) | `tests/test_book_builder.cpp` |
 | Synthetic data consistency, determinism, cross-platform digests | `tests/test_synth.cpp` |

@@ -31,21 +31,26 @@ Last updated: 2026-11-02
 - Benchmark harness and `scripts/bench.sh`. The reference book was profiled before the optimized
   book was written. Recorded reports are in `bench/results/`.
 - CLI commands: `mde decode | gen | book | replay | serve | listen | sim`.
+- Release checks: a fresh clone builds and passes the tests, every README example was run, and
+  two independent code reviews were triaged; the fixes are in (see JOURNAL, milestone 10).
 
 ## Remaining
 
-| # | Item | Done when |
-|---|---|---|
-| 10 | Release | README and BENCHMARKS.md final, fresh-clone build and documented examples verified, CI green on the final commit |
+Nothing required by the brief is open. Possible next steps:
+
+- batch the feed-to-book handoff per packet;
+- a deep-book benchmark (binary versus linear level search);
+- Linux benchmarks on dedicated hardware with real pinning;
+- tune the simulated exchange.
 
 ## Latest test results
 
-128/128 pass:
+131/131 pass:
 
 - macOS (Apple clang 21): Debug, ASan+UBSan, TSan, Release.
 - Linux in Docker (GCC 14, clang 18): Release and Debug ASan+UBSan, plus clang 18 TSan.
 
-All builds use `-Werror`. Fuzzers ran 60 s each locally with no findings.
+All builds use `-Werror`. Both fuzzers ran 60 s with no findings.
 
 ## Known issues
 
@@ -58,4 +63,4 @@ All builds use `-Werror`. Fuzzers ran 60 s each locally with no findings.
 
 ## Next step
 
-Finish milestone 10: final documentation, fresh-clone verification, and a final audit.
+None scheduled. See "Remaining" for candidates.

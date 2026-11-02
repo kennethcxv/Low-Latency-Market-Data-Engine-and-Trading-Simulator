@@ -438,3 +438,57 @@ or the session never reached end of session.
   - the 9.0 figure was noise.
 
   Recorded as a trade-off in BENCHMARKS.md.
+
+## 2026-11-02 — Milestone 10: release checks and independent review
+
+**Fresh clone.** I cloned from GitHub into an empty directory and built it there. `cmake --preset
+release` followed by `ctest` passed 128/128. I ran every README example verbatim. The lossy
+two-thread replay of 2M messages printed the same digest (`29663e8d39e17758`) as the direct
+rebuild. One problem surfaced: `mde book --check` on 2M messages took 8.5 minutes. The README now
+says so and shows `--check` on a 200k-message file.
+
+**Independent review.** Two reviewer agents read the code with no knowledge of how it was
+written: one covered protocol, sequencing and networking; the other covered books, pipeline and
+simulator. I checked each finding against the code before acting on it.
+
+*Fixed:*
+
+- **One bogus far-ahead sequence could disable the receiver** (medium). A valid-session heartbeat
+  claiming sequence 2⁶³ opened a hole. Once that hole was skipped, every real packet looked like a
+  duplicate, and a later end-of-session would report the session complete. MoldUDP64 has no
+  checksum. Packets more than `max_sequence_jump` (2³²) past the highest sequence seen are now
+  rejected and counted. The 10¹² stress test, which had assumed such jumps are accepted, now
+  checks rejection, plus bounded work for a plausible 10⁹ jump.
+- **A blocking `recvfrom` after `poll`** could hang on Linux if the kernel discarded the datagram
+  between the two calls (bad checksum). It now uses `MSG_DONTWAIT`.
+- **`ReferenceMarket::depth(…, 0)` returned one level; `FastMarket` returned none.** This was a
+  real divergence in the oracle, missed because every caller used a nonzero limit. Fixed, and the
+  typed test now covers it.
+- **The reorder buffer was bounded only by packet count,** which allows about 268 MB with
+  maximum-size datagrams. Added a 64 MB byte cap and a test.
+- **Elapsed-time arithmetic now saturates** if a caller's clock goes backwards.
+- **`send_to`** now reports transient errors (unreachable, `EPERM`, `ENOBUFS`, …) as loss instead of
+  aborting the receive loop.
+- **Smaller fixes:**
+  - endpoint parsing rejects trailing text;
+  - `SO_REUSEADDR` is set only on multicast sockets;
+  - `burst = 0` no longer underflows in the test channel;
+  - the publisher drains at most 64 requests per call and always sends at least one end-of-session;
+  - a zero-length `memcpy` is guarded;
+  - an exception message no longer contradicts its check;
+  - several comments that overstated were corrected.
+- **The MoldUDP64 fuzzer** now also checks `delivered + lost == next_sequence - 1`.
+
+*Kept, documented as trade-offs (DESIGN.md §5.2):*
+
+- **Skipping the whole hole after retries fail**, instead of only the range last requested. This
+  gets back to live data quickly.
+- **No reordering grace period** before the first re-request.
+
+*Not changed:*
+
+- The generator's cancel-of-a-1-share-order delegates to a delete that picks a different order.
+  It is harmless, and changing it would change every pinned fixture digest.
+- `used_client_ids_` grows for the life of a simulation, which is acceptable for a simulator.
+
+**Results.** 131/131 tests pass on macOS in Debug, ASan+UBSan, TSan and Release.
