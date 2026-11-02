@@ -13,12 +13,14 @@ Last updated: 2026-11-02
 - Conformance: golden vectors for all 23 types; exhaustive length, type-byte and enum rejection
   tests; seeded mutation fuzz in ctest; libFuzzer target in CI (11.4M execs / 60 s locally, no
   crashes).
+- Reference order book (map/list/hash), ITCH book builder with separate volume statistics,
+  invariant checker, synthetic generator with cross-platform byte-identical output, `mde gen`,
+  `mde book --check`.
 
 ## Remaining (acceptance criteria)
 
 | # | Milestone | Done when |
 |---|---|---|
-| 4 | Reference order book | add/execute/cancel/delete/replace with priority; invariants checked after every event; P/Q/C volume semantics tested; synthetic generator; `mde book` |
 | 5 | Sequencing and replay | MoldUDP64 parser with golden vectors; sequencer handles gap/dup/reorder/heartbeat/end-of-session; lossy replay recovers to the same book digest as lossless; UDP loopback test with re-requests |
 | 6 | Multithreaded pipeline | SPSC ring and mutex baseline; threaded replay digest equals single-threaded; TSan job in CI |
 | 7 | Simulated trading | matching engine (price-time), cancels, execution reports, positions, max qty/notional/position checks; deterministic digest test |
@@ -28,8 +30,8 @@ Last updated: 2026-11-02
 
 ## Latest test results
 
-59/59 pass on macOS (Apple clang 21: Debug, ASan+UBSan). GitHub Actions run 41445072654 passed
-(GCC 14 and clang 18, Release and ASan+UBSan).
+76/76 pass on macOS (Apple clang 21: Debug, ASan+UBSan) and Linux in Docker (GCC 14, clang 18:
+Release and Debug ASan+UBSan, `-Werror`).
 
 ## Known issues
 
@@ -37,4 +39,4 @@ None open.
 
 ## Next step
 
-Milestone 4: reference order book, ITCH-to-book builder, synthetic generator, `mde book`.
+Milestone 5: MoldUDP64 packets, sequencer, lossy replay harness, UDP transport.
