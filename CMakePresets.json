@@ -34,7 +34,8 @@
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "MDE_SANITIZE": "address,undefined"
+        "MDE_SANITIZE": "address,undefined",
+        "MDE_BUILD_BENCH": "OFF"
       }
     },
     {
@@ -43,7 +44,8 @@
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "MDE_SANITIZE": "thread"
+        "MDE_SANITIZE": "thread",
+        "MDE_BUILD_BENCH": "OFF"
       }
     },
     {
@@ -55,7 +57,8 @@
         "CMAKE_CXX_COMPILER": "clang++",
         "MDE_SANITIZE": "address,undefined",
         "MDE_BUILD_FUZZ": "ON",
-        "MDE_BUILD_TESTS": "OFF"
+        "MDE_BUILD_TESTS": "OFF",
+        "MDE_BUILD_BENCH": "OFF"
       }
     }
   ],
