@@ -8,6 +8,7 @@
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -79,6 +80,8 @@ std::vector<std::uint8_t> read_file(const std::string& path) {
 }
 
 void write_file(const std::string& path, const std::vector<std::uint8_t>& data) {
+  const std::filesystem::path parent = std::filesystem::path(path).parent_path();
+  if (!parent.empty()) std::filesystem::create_directories(parent);
   std::ofstream out(path, std::ios::binary);
   out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
   if (!out) throw std::runtime_error("cannot write " + path);
